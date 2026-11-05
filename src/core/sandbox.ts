@@ -66,6 +66,22 @@ const HIDDEN_HOME_PATHS = [
   ".local/share/agent",
 ];
 
+// The file tools run in the agent's own process, not in the sandbox, so they
+// also need these hidden: /proc holds every process's environment, including
+// the agent's API keys.
+const HIDDEN_FROM_FILE_TOOLS = ["/proc", "/sys", "/dev"];
+
+/**
+ * Whether a path is off limits to the agent's file tools: the same places
+ * the sandbox hides from commands (credentials, sockets, other temp files,
+ * the agent's own data) plus /proc, /sys and /dev.
+ */
+export function isHiddenFromAgent(file: string): boolean {
+  const home = os.homedir();
+  const roots = [...HIDDEN_SYSTEM_DIRS, ...HIDDEN_FROM_FILE_TOOLS, ...HIDDEN_HOME_PATHS.map((rel) => path.join(home, rel))];
+  return roots.some((root) => file === root || file.startsWith(root + path.sep));
+}
+
 export interface SpawnSpec {
   file: string;
   args: string[];

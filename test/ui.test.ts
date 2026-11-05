@@ -5,6 +5,10 @@ import { box } from "../src/ui/entries.js";
 import { KeyReader } from "../src/ui/keys.js";
 import { inline, markdownLines, safeSplit } from "../src/ui/markdown.js";
 import { Picker } from "../src/ui/picker.js";
+import { isGitRepo, listFolders } from "../src/ui/folders.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { InlineRenderer } from "../src/ui/renderer.js";
 import { type Line, setColors, toAnsi } from "../src/ui/style.js";
 import { lineWidth, sanitize, textWidth, truncate, wrap } from "../src/ui/text.js";
@@ -177,6 +181,29 @@ test("picker filters and selects", () => {
   for (const key of new KeyReader().feed("qwen\x1b[B")) picker.handle(key);
   assert.deepEqual(picker.handle({ name: "return" }), { value: "c" });
   assert.equal(picker.handle({ name: "escape" }), "cancel");
+});
+
+test("picker: backspace with nothing typed goes back", () => {
+  const picker = new Picker("Folder", [{ value: "a", label: "alpha/" }], undefined, { back: "up" });
+  for (const key of new KeyReader().feed("al")) picker.handle(key);
+  assert.equal(picker.handle({ name: "backspace" }), undefined, "first it edits the filter");
+  picker.handle({ name: "backspace" });
+  assert.deepEqual(picker.handle({ name: "backspace" }), { value: "up" });
+});
+
+test("folder listing: sorted, hidden and files left out, symlinked folders kept", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-folders-"));
+  try {
+    for (const d of ["beta", "Alpha", ".hidden", "repo/.git"]) fs.mkdirSync(path.join(dir, d), { recursive: true });
+    fs.writeFileSync(path.join(dir, "file.txt"), "");
+    fs.symlinkSync(path.join(dir, "beta"), path.join(dir, "link"));
+    assert.deepEqual(listFolders(dir).names, ["Alpha", "beta", "link", "repo"]);
+    assert.equal(isGitRepo(path.join(dir, "repo")), true);
+    assert.equal(isGitRepo(path.join(dir, "beta")), false);
+    assert.match(listFolders(path.join(dir, "missing")).error ?? "", /ENOENT|no such/i);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("box pads lines to the same width", () => {

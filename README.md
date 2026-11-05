@@ -68,7 +68,9 @@ npm run dev -- -p "list the TODOs in src" --yes   # headless, one prompt
 npm run dev -- -c                             # resume the last session in this directory
 ```
 
-`npm run dev -- --help` lists every flag.
+`npm run dev -- --help` lists every flag. `agent <folder>` works in that folder instead of the
+current directory; the folder you work in is the project, the only place the agent can change
+files. `--resume <id>` goes back to the folder the session was in.
 
 ## Endpoints
 
@@ -119,7 +121,8 @@ configured endpoint they weren't set for. The file is only read, never written.
 | `/skills` | list the available skills |
 | `/compact` | summarize the conversation now |
 | `/sessions` | switch to another session from this folder (type to search by first message) |
-| `/new` | start a new session; `/clear` does the same, and the old one stays resumable |
+| `/new [folder]` | start a new session, here or in another folder; `/clear` does the same, and the old one stays resumable |
+| `/open` | pick a project folder: a recent one, or browse (enter opens, backspace goes up, type to filter) |
 | `/help`, `/exit` | |
 
 Enter sends, ↑/↓ recall earlier input, Esc interrupts the agent and Ctrl+C quits. You can keep
@@ -249,9 +252,17 @@ test/                    unit tests, and loop tests against a fake streaming ser
 
 ## Security
 
-`read_file`, `grep` and `glob` run without asking. `write_file`, `edit_file` and `bash` ask
-first, with an option to always allow that tool for the rest of the session. File tools are
-confined to the working directory and may not write into `.git`.
+`read_file`, `grep` and `glob` run without asking inside the project. They can also read
+outside it (absolute paths, `../`, `~/`), for example the main repository when you work in a
+submodule; that asks first. `write_file`, `edit_file` and `bash` always ask, with an option to
+always allow that tool for the rest of the session. Writing is confined to the project, and
+never into `.git`.
+
+Some places are off limits to the file tools even with approval, the same ones the sandbox hides
+from commands: credentials and shell history in your home folder, `/tmp`, `/run`, `/mnt`, the
+agent's own config and sessions, and also `/proc`, `/sys` and `/dev` (the file tools run in the
+agent's own process, and `/proc` would expose its API keys). Symlinks are resolved before the
+check, so a link in the project can't lead there.
 
 ### Shell sandbox
 

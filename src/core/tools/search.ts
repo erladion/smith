@@ -3,9 +3,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { globToRegExp } from "../glob.js";
-import { resolveInRoot } from "../paths.js";
+import { resolveForRead } from "../paths.js";
 import { fastTools } from "../toolchain.js";
-import { defineTool, type ToolResult, truncate } from "../tool.js";
+import { defineTool, type ToolContext, type ToolResult, truncate } from "../tool.js";
+import { OUTSIDE } from "./files.js";
+
+/** Approval reason for searching a path outside the project. */
+async function outsideReason(p: string | undefined, ctx: ToolContext): Promise<string | undefined> {
+  return p && (await resolveForRead(ctx.cwd, p)).outside ? OUTSIDE : undefined;
+}
 
 const MAX_OUTPUT_CHARS = 15_000;
 const MAX_GLOB_RESULTS = 200;
@@ -13,7 +19,7 @@ const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".venv", "__
 
 const grepSchema = z.object({
   pattern: z.string().min(1).describe("Regular expression to search for"),
-  path: z.string().optional().describe("File or directory to search, relative to the working directory (default: all)"),
+  path: z.string().optional().describe("File or directory to search (default: the working directory); may be outside it, which asks the user"),
   glob: z.string().optional().describe('Only search files matching this glob, e.g. "*.ts" or "src/**/*.py"'),
   ignore_case: z.boolean().optional().describe("Case-insensitive search"),
   context: z.number().int().min(0).max(10).optional().describe("Lines of context around each match"),
@@ -31,8 +37,9 @@ export const grep = defineTool({
   readOnly: true,
   summarize: ({ pattern, path: p, glob }) =>
     [`/${pattern}/`, p && `in ${p}`, glob && `(${glob})`].filter(Boolean).join(" "),
+  approvalReason: ({ path: p }, ctx) => outsideReason(p, ctx),
   async run(input, ctx) {
-    const target = input.path ? path.relative(ctx.cwd, await resolveInRoot(ctx.cwd, input.path)) || "." : ".";
+    const target = input.path ? path.relative(ctx.cwd, (await resolveForRead(ctx.cwd, input.path)).path) || "." : ".";
     // ripgrep when installed (much faster, respects .gitignore), else grep.
     const { rg } = fastTools();
     let result = rg ? await runSearch(rg, ripgrepArgs(input, target), ctx.cwd, ctx.signal) : undefined;
@@ -56,15 +63,16 @@ export const glob = defineTool({
     "Skips .git, node_modules, common build directories and (when ripgrep is installed) anything in .gitignore.",
   schema: z.object({
     pattern: z.string().min(1).describe("Glob pattern, relative to path"),
-    path: z.string().optional().describe("Directory to search from, relative to the working directory (default: .)"),
+    path: z.string().optional().describe("Directory to search from (default: the working directory); may be outside it, which asks the user"),
   }),
   readOnly: true,
   summarize: ({ pattern, path: p }) => (p ? `${pattern} in ${p}` : pattern),
+  approvalReason: ({ path: p }, ctx) => outsideReason(p, ctx),
   async run({ pattern, path: p }, ctx): Promise<ToolResult> {
     if (path.isAbsolute(pattern) || pattern.split("/").includes("..")) {
       return { content: "The pattern must be relative and must not contain '..'. Use path to choose where to search.", isError: true };
     }
-    const base = await resolveInRoot(ctx.cwd, p ?? ".");
+    const base = (await resolveForRead(ctx.cwd, p ?? ".")).path;
     const regex = globToRegExp(pattern);
     const matches: { file: string; mtime: number }[] = [];
 

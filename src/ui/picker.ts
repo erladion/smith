@@ -18,6 +18,12 @@ export class Picker {
     readonly title: string,
     readonly items: PickerItem[],
     readonly current?: string,
+    private readonly options: {
+      /** Chosen when backspace is pressed with nothing typed (e.g. "go up" in a folder browser). */
+      back?: string;
+      /** Replaces the default key help line. */
+      help?: string;
+    } = {},
   ) {
     this.index = Math.max(0, items.findIndex((i) => i.value === current));
   }
@@ -43,6 +49,7 @@ export class Picker {
     if (key.name === "up") this.index = at === 0 ? visible.length - 1 : at - 1;
     else if (key.name === "down") this.index = at >= visible.length - 1 ? 0 : at + 1;
     else if (key.name === "backspace") {
+      if (!this.filter && this.options.back) return { value: this.options.back };
       this.filter = this.filter.slice(0, -1);
       this.index = 0;
     } else if (key.name === "text" || key.name === "paste") {
@@ -61,7 +68,7 @@ export class Picker {
 
     const out: Line[] = [
       [{ text: this.title, style: { bold: true } }],
-      [{ text: this.filter ? `filter: ${this.filter}` : "type to filter · ↑↓ move · enter select · esc cancel", style: { dim: true } }],
+      [{ text: this.filter ? `filter: ${this.filter}` : (this.options.help ?? "type to filter · ↑↓ move · enter select · esc cancel"), style: { dim: true } }],
     ];
     if (start > 0) out.push([{ text: `  ↑ ${start} more`, style: { dim: true } }]);
     shown.forEach((item, i) => {

@@ -313,6 +313,62 @@ test("a sub-agent investigates in its own context and only its report comes back
   assert.ok(events.some((e) => e.type === "activity" && /find config › grep/.test(e.text)));
 });
 
+const readCall = (index: number, id: string, file: string) => ({
+  tool_calls: [{ index, id, type: "function", function: { name: "read_file", arguments: JSON.stringify({ path: file }) } }],
+});
+
+test("reads outside the project ask, one prompt at a time; always-allow covers the rest", async () => {
+  await fs.writeFile(path.join(dir, "inside.txt"), "in\n");
+  fake.script = [
+    { deltas: [readCall(0, "r1", "inside.txt"), readCall(1, "r2", "/etc/hostname"), readCall(2, "r3", "/etc/os-release")], finish: "tool_calls" },
+    { deltas: [{ content: "read them" }], finish: "stop" },
+  ];
+  const asked: { summary: string; note?: string }[] = [];
+  let open = 0;
+  let overlapped = false;
+  const { agent } = makeAgent("allow", {
+    approve: async (req) => {
+      overlapped ||= open > 0;
+      open++;
+      asked.push({ summary: req.summary, note: req.note });
+      await new Promise((r) => setTimeout(r, 50));
+      open--;
+      return "allow_always";
+    },
+  });
+  await agent.send("read", new AbortController().signal);
+
+  // The two outside reads resolve their paths in parallel, so either may ask first.
+  assert.equal(asked.length, 1, "asked once, then always-allowed");
+  assert.match(asked[0]!.summary, /^\/etc\/(hostname|os-release)$/);
+  assert.equal(asked[0]!.note, "Reads outside the project folder.");
+  assert.equal(overlapped, false);
+  const results = fake.requests[1]!.messages.filter((m: { role: string }) => m.role === "tool").map((m: { content: string }) => m.content);
+  assert.match(results[0], /^1\tin/);
+  assert.ok(results.every((c: string) => !c.startsWith("Error")));
+});
+
+test("a sub-agent reading outside the project asks through the main agent", async () => {
+  fake.script = [
+    { deltas: toolCallDeltas("task", { description: "check hosts", prompt: "Read /etc/hostname" }), finish: "tool_calls" },
+    { deltas: [readCall(0, "s1", "/etc/hostname")], finish: "tool_calls" },
+    { deltas: [{ content: "hostname read" }], finish: "stop" },
+    { deltas: [{ content: "done" }], finish: "stop" },
+  ];
+  const notes: (string | undefined)[] = [];
+  const { agent } = makeAgent("allow", {
+    subagentPrompt: "SUB",
+    approve: async (req) => {
+      notes.push(req.note);
+      return "deny";
+    },
+  });
+  await agent.send("go", new AbortController().signal);
+  assert.deepEqual(notes, ['Sub-agent "check hosts": Reads outside the project folder.']);
+  const childResult = fake.requests[2]!.messages.at(-1);
+  assert.match(childResult.content, /^Error: The user declined/);
+});
+
 test("loading a saved conversation replaces history without recording it", async () => {
   const { agent, changes } = makeAgent();
   agent.loadConversation([

@@ -1,29 +1,32 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { assertWritable, resolveInRoot } from "../paths.js";
+import { assertWritable, resolveForRead, resolveInRoot } from "../paths.js";
 import { diffLines, diffStats } from "../diff.js";
 import { defineTool, type ToolContext, truncate } from "../tool.js";
 
 const MAX_OUTPUT_CHARS = 20_000;
 const DEFAULT_LINE_LIMIT = 500;
 const MAX_LINE_CHARS = 1_000;
+export const OUTSIDE = "Reads outside the project folder.";
 
 export const readFile = defineTool({
   name: "read_file",
   description:
     "Read a text file. Returns lines prefixed with their 1-based line numbers. " +
-    `Reads up to ${DEFAULT_LINE_LIMIT} lines by default; use offset and limit for larger files.`,
+    `Reads up to ${DEFAULT_LINE_LIMIT} lines by default; use offset and limit for larger files. ` +
+    "Files outside the working directory can be read too (the user is asked first).",
   schema: z.object({
-    path: z.string().describe("File path, relative to the working directory"),
+    path: z.string().describe("File path, relative to the working directory, absolute, or starting with ~/"),
     offset: z.number().int().min(1).optional().describe("First line to read (1-based)"),
     limit: z.number().int().min(1).optional().describe("Maximum number of lines to read"),
   }),
   readOnly: true,
   summarize: ({ path: p, offset, limit }) =>
     offset || limit ? `${p} (lines ${offset ?? 1}-${(offset ?? 1) + (limit ?? DEFAULT_LINE_LIMIT) - 1})` : p,
+  approvalReason: async ({ path: p }, ctx) => ((await resolveForRead(ctx.cwd, p)).outside ? OUTSIDE : undefined),
   async run({ path: p, offset = 1, limit = DEFAULT_LINE_LIMIT }, ctx) {
-    const file = await resolveInRoot(ctx.cwd, p);
+    const file = (await resolveForRead(ctx.cwd, p)).path;
     const text = await fs.readFile(file, "utf8");
     if (text.includes("\0")) return { content: `${p} looks like a binary file.`, isError: true };
 

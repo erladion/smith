@@ -34,6 +34,11 @@ export interface ToolDef<S extends z.ZodType = z.ZodType> {
   /** One-line description of a call, shown in the transcript and approval prompt. */
   summarize: (input: z.output<S>) => string;
   /**
+   * For read-only tools: why this particular call needs approval anyway
+   * (e.g. it reads outside the project), or undefined if it doesn't.
+   */
+  approvalReason?: (input: z.output<S>, ctx: ToolContext) => Promise<string | undefined>;
+  /**
    * The change the call would make, shown in the approval prompt. Throwing
    * means the call would fail; the error goes to the model without asking.
    */

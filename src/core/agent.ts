@@ -33,6 +33,8 @@ export interface ApprovalRequest {
   sandbox?: { active: boolean; description: string };
   /** For file changes: the diff the call would apply. */
   preview?: DiffLine[];
+  /** Why a normally prompt-free tool asks this time (e.g. reading outside the project). */
+  note?: string;
 }
 
 export interface UndoResult {
@@ -69,6 +71,8 @@ export interface AgentOptions {
    * runs a sub-agent with this prompt and the read-only tools.
    */
   subagentPrompt?: string;
+  /** Tools the user allowed for the session; shared with sub-agents so a grant applies to both. */
+  alwaysAllowed?: Set<string>;
   /** Earlier conversation to continue (without the system prompt), e.g. from a saved session. */
   history?: Message[];
   /** Called on every change to the conversation, for persistence. */
@@ -112,7 +116,9 @@ export class Agent {
   private readonly history: Message[];
   private readonly toolsByName: Map<string, ToolDef>;
   private readonly apiTools: OpenAI.Chat.Completions.ChatCompletionTool[];
-  private readonly alwaysAllowed = new Set<string>();
+  private readonly alwaysAllowed: Set<string>;
+  /** Approvals are asked one at a time, even when tools run in parallel. */
+  private approvals: Promise<unknown> = Promise.resolve();
   /** Recent turns, newest last: where each started in the history and what it changed. */
   private turns: { start: number; prompt: string; checkpoint: Checkpoint }[] = [];
   /** Messages typed while the agent works, delivered at the next safe point. */
@@ -132,6 +138,7 @@ export class Agent {
     this.toolsByName = new Map(tools.map((t) => [t.name, t]));
     this.apiTools = tools.map(toApiTool);
     this.contextSize = opts.contextSize;
+    this.alwaysAllowed = opts.alwaysAllowed ?? new Set();
     this.client = opts.client;
     this.modelId = opts.model;
     this.reasoningLevel = opts.reasoning ?? "default";
@@ -139,6 +146,11 @@ export class Agent {
 
   get model(): string {
     return this.modelId;
+  }
+
+  /** The context window in tokens, if known. */
+  get contextLimit(): number | undefined {
+    return this.contextSize;
   }
 
   get reasoning(): ReasoningLevel {
@@ -368,7 +380,9 @@ export class Agent {
       // Read-only tools only (which also rules out nested sub-agents).
       tools: this.opts.tools.filter((t) => t.readOnly),
       systemPrompt: this.opts.subagentPrompt!,
-      approve: async () => "deny",
+      alwaysAllowed: this.alwaysAllowed,
+      // Its tools are read-only, but reading outside the project still asks you.
+      approve: (req) => this.requestApproval({ ...req, note: `Sub-agent "${description}": ${req.note ?? ""}`.trim() }),
       onEvent: (event) => {
         if (event.type === "tool_start") emit({ type: "activity", text: `${description} › ${event.name} ${event.summary}` });
         else if (event.type === "done") reason = event.reason;
@@ -602,7 +616,8 @@ export class Agent {
     const summary = tool.summarize(input);
 
     const ctx = this.toolContext(tool, signal);
-    if (!tool.readOnly && !this.alwaysAllowed.has(tool.name)) {
+    const reason = tool.readOnly ? await tool.approvalReason?.(input, ctx).catch(() => undefined) : undefined;
+    if ((!tool.readOnly || reason) && !this.alwaysAllowed.has(tool.name)) {
       // Show the change in the prompt; a call that would fail anyway fails without asking.
       let preview: DiffLine[] | undefined;
       try {
@@ -611,11 +626,12 @@ export class Agent {
         return fail(err instanceof Error ? err.message : String(err), summary);
       }
       const sandbox = this.opts.sandbox ?? Sandbox.none();
-      const decision = await this.opts.approve({
+      const decision = await this.requestApproval({
         tool: tool.name,
         summary,
         input,
         preview,
+        note: reason,
         sandbox: tool.sandboxed ? { active: sandbox.active, description: sandbox.describe() } : undefined,
       });
       if (decision === "deny" || signal.aborted) {
@@ -641,6 +657,16 @@ export class Agent {
       diff: result.diff,
     });
     return result;
+  }
+
+  /**
+   * Asks the user, one request at a time. A request that waited may no
+   * longer need asking: an earlier answer can have been "always allow".
+   */
+  private requestApproval(req: ApprovalRequest): Promise<ApprovalDecision> {
+    const decision = this.approvals.then(() => (this.alwaysAllowed.has(req.tool) ? "allow" : this.opts.approve(req)));
+    this.approvals = decision.catch(() => {});
+    return decision;
   }
 
   private toolContext(tool: ToolDef, signal: AbortSignal) {

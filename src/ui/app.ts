@@ -1,3 +1,7 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import type OpenAI from "openai";
 import type { Agent, ApprovalDecision, ApprovalRequest } from "../core/agent.js";
 import { type Endpoint, EXAMPLE_CONFIG } from "../core/config.js";
 import { describeError } from "../core/errors.js";
@@ -14,6 +18,7 @@ import { type Key, KeyReader } from "./keys.js";
 import { markdownLines, safeSplit } from "./markdown.js";
 import { Picker } from "./picker.js";
 import { InlineRenderer } from "./renderer.js";
+import { isGitRepo, listFolders, tildify } from "./folders.js";
 import { historyToEntries } from "./replay.js";
 import type { Line } from "./style.js";
 import { prefixed, truncate, wrap } from "./text.js";
@@ -38,10 +43,36 @@ export interface SessionControl {
   open(id: string): { messages: Message[]; model: string; endpoint?: string };
   /** Starts recording to a new session (its file appears with the first message). */
   startNew(model: string, endpoint: string | undefined): void;
+  /** Folders with saved sessions, most recently used first. */
+  recentProjects(): { cwd: string; sessions: number; updated: Date }[];
+}
+
+/** Settings carried over when the agent is recreated for another project. */
+export interface AgentSettings {
+  client: OpenAI;
+  model: string;
+  reasoning: ReasoningLevel;
+  contextSize: number | undefined;
+}
+
+/** The folder being worked in, and what was loaded for it. */
+export interface ProjectView {
+  cwd: string;
+  /** Instruction files in use, for the banner. */
+  instructions: string[];
+  /** Skills available, for the banner and /skills. */
+  skills: { name: string; description: string }[];
+  tools: ToolDef[];
+  /** Problems found while loading (e.g. a skill without a description). */
+  warnings: string[];
 }
 
 export interface TuiOptions {
-  createAgent: (hooks: AgentHooks) => Agent;
+  /** Creates the agent for the current project; with `current`, carrying over those settings. */
+  createAgent: (hooks: AgentHooks, current?: AgentSettings) => Agent;
+  project: ProjectView;
+  /** Makes another folder the project (/new <folder>). Throws if it isn't a folder. */
+  switchProject: (folder: string) => ProjectView;
   /** The server the agent starts on. */
   server: Server;
   /** Endpoints from the config file, for /endpoint. */
@@ -52,15 +83,9 @@ export interface TuiOptions {
   /** The model last used on a server, if remembered. */
   rememberedModel: (baseURL: string) => string | undefined;
   sandbox: Sandbox;
-  cwd: string;
   sessions: SessionControl;
   /** Conversation restored from a saved session, shown before the prompt. */
   resumed: Message[];
-  tools: ToolDef[];
-  /** Instruction files in use, for the banner. */
-  instructions: string[];
-  /** Skills available, by name and description, for the banner and /skills. */
-  skills: { name: string; description: string }[];
   /** Remembers the user's endpoint, model and reasoning choices for next time. */
   savePreferences: (update: PreferenceUpdate) => void;
 }
@@ -75,7 +100,8 @@ const HELP = `Commands:
   /model [name]       pick a model from the server, or switch to one by name
   /reasoning [level]  pick how much the model thinks: ${REASONING_LEVELS.join(", ")}
   /sessions           switch to another session from this folder
-  /new                start a new session (/clear does the same)
+  /open               pick a project folder: a recent one, or browse to one
+  /new [folder]       start a new session, here or in another folder (/clear does the same)
   /undo               undo the last turn: restore files it changed and edit your message again
   /skills             list the available skills
   /network on|off     allow or block network access for sandboxed commands
@@ -102,13 +128,15 @@ export class TuiApp {
   private readonly renderer: InlineRenderer;
   private readonly keys = new KeyReader();
   private readonly editor = new LineEditor();
-  private readonly agent: Agent;
+  private agent: Agent;
+  private project: ProjectView;
+  private readonly hooks: AgentHooks;
   private server: Server;
 
   private live: { kind: BlockKind; text: string } | null = null;
   private activity: string | null = null;
   private approval: (ApprovalRequest & { resolve: (d: ApprovalDecision) => void }) | null = null;
-  private picker: { kind: "endpoint" | "model" | "reasoning" | "session"; picker: Picker } | null = null;
+  private picker: { kind: "endpoint" | "model" | "reasoning" | "session" | "folder"; picker: Picker } | null = null;
   private busy = false;
   private abort: AbortController | null = null;
   private context: { tokens: number; limit?: number } | null = null;
@@ -131,7 +159,9 @@ export class TuiApp {
   ) {
     this.server = opts.server;
     this.renderer = new InlineRenderer(term.output);
-    this.agent = opts.createAgent({ onEvent: (e) => this.onEvent(e), approve: (r) => this.approve(r) });
+    this.project = opts.project;
+    this.hooks = { onEvent: (e) => this.onEvent(e), approve: (r) => this.approve(r) };
+    this.agent = opts.createAgent(this.hooks);
   }
 
   /** Runs until the user quits. */
@@ -150,24 +180,24 @@ export class TuiApp {
 
     this.printBanner(this.opts.resumed.length > 0);
     for (const text of this.opts.warnings) this.print({ kind: "notice", level: "warn", text });
-    for (const entry of historyToEntries(this.opts.resumed, this.opts.tools)) this.print(entry);
+    for (const entry of historyToEntries(this.opts.resumed, this.project.tools)) this.print(entry);
     this.render();
 
     return new Promise((resolve) => (this.finished = resolve));
   }
 
   private printBanner(resumed: boolean): void {
-    const { sandbox, cwd } = this.opts;
+    const { sandbox } = this.opts;
     this.print({
       kind: "banner",
       model: this.agent.model,
       server: this.server.label,
-      cwd,
+      cwd: this.project.cwd,
       session: this.opts.sessions.currentId(),
       resumed,
       sandbox: { active: sandbox.active, description: sandbox.describe() },
-      instructions: this.opts.instructions,
-      skills: this.opts.skills.map((s) => s.name),
+      instructions: this.project.instructions,
+      skills: this.project.skills.map((s) => s.name),
     });
   }
 
@@ -296,6 +326,7 @@ export class TuiApp {
     const content: Line[] = [[{ text: `Allow ${req.tool}?`, style: { bold: true } }]];
     const summary = wrap([{ text: req.summary }], width - 4);
     content.push(...summary.slice(0, 12));
+    if (req.note) content.push([{ text: req.note, style: { color: "yellow" } }]);
     if (summary.length > 12) content.push([{ text: `… ${summary.length - 12} more lines`, style: DIM }]);
     if (req.preview) {
       // Leave room for the rest of the screen, but show as much of the change as fits.
@@ -492,10 +523,12 @@ export class TuiApp {
           return this.print({ kind: "notice", level: "info", text: HELP });
         case "/new":
         case "/clear":
-          return this.newSession();
+          return this.newSession(arg);
         case "/sessions":
         case "/resume":
           return this.openSessionPicker();
+        case "/open":
+          return this.openProjectPicker();
         case "/network":
           return this.setNetwork(arg);
         case "/undo":
@@ -566,11 +599,72 @@ export class TuiApp {
     }
   }
 
-  private newSession(): void {
+  /** Starts a new session, in another folder if one is given. */
+  private newSession(folder?: string): void {
     const previous = this.opts.sessions.currentId();
+    const notes: Entry[] = [];
+    if (folder) {
+      let next: ProjectView;
+      try {
+        next = this.opts.switchProject(folder);
+      } catch (err) {
+        return this.print({ kind: "notice", level: "error", text: (err as Error).message });
+      }
+      // A fresh agent for the new folder (its prompt, instructions, skills and
+      // permissions), keeping the server, model and reasoning level.
+      const current = { client: this.server.client, model: this.agent.model, reasoning: this.agent.reasoning, contextSize: this.agent.contextLimit };
+      this.project = next;
+      this.agent = this.opts.createAgent(this.hooks, current);
+      notes.push(...next.warnings.map((text): Entry => ({ kind: "notice", level: "warn", text })));
+      if (next.cwd === os.homedir() || next.cwd === "/") {
+        notes.push({ kind: "notice", level: "warn", text: `The project is now ${next.cwd}: the agent can change anything under it.` });
+      }
+    } else {
+      this.agent.loadConversation([]);
+    }
     this.opts.sessions.startNew(this.agent.model, this.server.name);
-    this.agent.loadConversation([]);
-    this.startOver(false, [{ kind: "notice", level: "info", text: `Started a new session. The previous one is ${previous}; /sessions switches back.` }]);
+    const where = folder ? ` in ${tildify(this.project.cwd)}` : "";
+    notes.unshift({ kind: "notice", level: "info", text: `Started a new session${where}. The previous one is ${previous}; /sessions lists this folder's sessions.` });
+    this.startOver(false, notes);
+  }
+
+  /** /open: recent project folders, and a way into the folder browser. */
+  private openProjectPicker(): void {
+    const recent = this.opts.sessions.recentProjects().filter((p) => p.cwd !== this.project.cwd && fs.existsSync(p.cwd));
+    const items = [
+      { value: `browse:${this.project.cwd}`, label: "Browse folders…", hint: "starting from the current project" },
+      ...recent.map((p) => ({
+        value: `use:${p.cwd}`,
+        // The folder's name stays readable even when its full path is long.
+        label: path.basename(p.cwd) || p.cwd,
+        hint: `${p.sessions} session${p.sessions === 1 ? "" : "s"} · ${ago(p.updated)} · ${tildify(path.dirname(p.cwd))}`,
+      })),
+    ];
+    this.picker = { kind: "folder", picker: new Picker("Open a project", items) };
+  }
+
+  /** The folder browser: enter goes into a folder, backspace or .. goes up, "Use this folder" switches. */
+  private browseFolder(dir: string): void {
+    const sessionCounts = new Map(this.opts.sessions.recentProjects().map((p) => [p.cwd, p.sessions]));
+    const describe = (folder: string) => {
+      const count = sessionCounts.get(folder);
+      return [isGitRepo(folder) && "git", count && `${count} session${count === 1 ? "" : "s"}`].filter(Boolean).join(" · ") || undefined;
+    };
+    const parent = path.dirname(dir);
+    const { names, error } = listFolders(dir);
+    const items = [
+      { value: `use:${dir}`, label: "✓ Use this folder", hint: describe(dir) ?? (dir === this.project.cwd ? "the current project" : undefined) },
+      ...(parent !== dir ? [{ value: `browse:${parent}`, label: "..", hint: "up one level" }] : []),
+      ...names.map((name) => ({ value: `browse:${path.join(dir, name)}`, label: `${name}/`, hint: describe(path.join(dir, name)) })),
+    ];
+    if (error) items.push({ value: `browse:${dir}`, label: `(${error})`, hint: undefined });
+    this.picker = {
+      kind: "folder",
+      picker: new Picker(tildify(dir), items, undefined, {
+        back: parent !== dir ? `browse:${parent}` : undefined,
+        help: "type to filter · enter opens · backspace goes up · esc cancels",
+      }),
+    };
   }
 
   private openSessionPicker(): void {
@@ -595,7 +689,7 @@ export class TuiApp {
       return this.print({ kind: "notice", level: "error", text: `Could not open session ${id}: ${(err as Error).message}` });
     }
     this.agent.loadConversation(opened.messages);
-    this.startOver(true, historyToEntries(opened.messages, this.opts.tools));
+    this.startOver(true, historyToEntries(opened.messages, this.project.tools));
 
     // Continue on the endpoint and model the session last used, when they're available.
     const { endpoint, model } = opened;
@@ -611,7 +705,8 @@ export class TuiApp {
   private async undo(): Promise<void> {
     const result = await this.agent.undo();
     if (!result) return this.print({ kind: "notice", level: "info", text: "Nothing to undo." });
-    const rel = (f: string) => f.startsWith(this.opts.cwd + "/") ? f.slice(this.opts.cwd.length + 1) : f;
+    const cwd = this.project.cwd;
+    const rel = (f: string) => (f.startsWith(cwd + "/") ? f.slice(cwd.length + 1) : f);
     const lines = ["Undid the last turn and removed it from the conversation."];
     if (result.restored.length) lines.push(`Restored: ${result.restored.map(rel).join(", ")}`);
     if (result.skipped.length) lines.push(`Left alone because they changed afterwards: ${result.skipped.map(rel).join(", ")}`);
@@ -621,7 +716,7 @@ export class TuiApp {
   }
 
   private listSkills(): void {
-    const { skills } = this.opts;
+    const { skills } = this.project;
     if (skills.length === 0) {
       return this.print({ kind: "notice", level: "info", text: "No skills found. Add folders with a SKILL.md to .agents/skills/ in the project or ~/.config/agent/skills/." });
     }
@@ -645,6 +740,10 @@ export class TuiApp {
     this.picker = null;
     if (open?.kind === "endpoint" && value !== this.server.name) void this.switchEndpoint(value);
     if (open?.kind === "session" && value !== this.opts.sessions.currentId()) void this.switchSession(value);
+    if (open?.kind === "folder") {
+      if (value.startsWith("browse:")) this.browseFolder(value.slice("browse:".length));
+      else if (value.startsWith("use:")) this.newSession(value.slice("use:".length));
+    }
     if (open?.kind === "model" && value !== this.agent.model) void this.switchModel(value);
     if (open?.kind === "reasoning" && isReasoningLevel(value) && value !== this.agent.reasoning) this.switchReasoning(value);
   }

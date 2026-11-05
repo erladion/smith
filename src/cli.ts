@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -7,21 +8,25 @@ import { type Config, EXAMPLE_CONFIG, loadConfig } from "./core/config.js";
 import type { AgentEvent } from "./core/events.js";
 import type { Message } from "./core/history.js";
 import { loadPreferences, type Preferences, savePreferences } from "./core/preferences.js";
-import { findRepoRoot, loadInstructions } from "./core/instructions.js";
+import { findRepoRoot, type InstructionFile, loadInstructions } from "./core/instructions.js";
 import { buildSubagentPrompt, buildSystemPrompt } from "./core/prompt.js";
 import { isReasoningLevel, REASONING_LEVELS, type ReasoningLevel } from "./core/reasoning.js";
 import { Sandbox, type SandboxMode } from "./core/sandbox.js";
 import { Server } from "./core/server.js";
 import { listSessions, Session } from "./core/session.js";
-import { loadSkills, skillRoots } from "./core/skills.js";
+import { loadSkills, type Skill, skillRoots } from "./core/skills.js";
+import type { ToolDef } from "./core/tool.js";
 import { fastTools } from "./core/toolchain.js";
 import { defaultTools } from "./core/tools/index.js";
 import { createSkillTool } from "./core/tools/skill.js";
-import { type AgentHooks, TuiApp } from "./ui/app.js";
+import { type AgentHooks, type AgentSettings, type ProjectView, TuiApp } from "./ui/app.js";
 import { describeError } from "./core/errors.js";
 import { VERSION } from "./version.js";
 
-const HELP = `Usage: agent [options]
+const HELP = `Usage: agent [options] [folder]
+
+Works in [folder], or the current directory. That folder is the project: the only place the
+agent can change files.
 
 Server:
   -e, --endpoint <name>  Use an endpoint from the config file (default: last used, else the config's default)
@@ -54,7 +59,8 @@ One-shot:
 Endpoints are configured in ~/.config/agent/config.json; run --endpoints for an example.`;
 
 async function main(): Promise<void> {
-  const { values } = parseArgs({
+  const { values, positionals } = parseArgs({
+    allowPositionals: true,
     options: {
       endpoint: { type: "string", short: "e" },
       endpoints: { type: "boolean" },
@@ -85,25 +91,29 @@ async function main(): Promise<void> {
     return;
   }
 
-  const cwd = process.cwd();
+  if (positionals.length > 1) throw new Error("Give at most one folder to work in.");
+  if (positionals[0]) process.chdir(resolveFolder(positionals[0], process.cwd()));
   if (values.sessions) {
-    printSessions(cwd);
+    printSessions(process.cwd());
     return;
   }
+  // Resume first: a resumed session suggests which model to use, and where to work.
+  let resumed: { session: Session; messages: Message[] } | null = null;
+  if (values.resume) {
+    resumed = Session.open(values.resume);
+    // Work where the session happened, unless a folder was given.
+    if (!positionals[0] && fs.existsSync(resumed.session.cwd)) process.chdir(resumed.session.cwd);
+  } else if (values.continue) {
+    const latest = listSessions(process.cwd())[0];
+    if (!latest) throw new Error("No saved session for this directory.");
+    resumed = Session.open(latest.id);
+  }
+
+  const cwd = process.cwd();
   const config = loadConfig();
   if (values.endpoints) {
     printEndpoints(config);
     return;
-  }
-
-  // Resume first: a resumed session suggests which model to use.
-  let resumed: { session: Session; messages: Message[] } | null = null;
-  if (values.resume) {
-    resumed = Session.open(values.resume);
-  } else if (values.continue) {
-    const latest = listSessions(cwd)[0];
-    if (!latest) throw new Error("No saved session for this directory.");
-    resumed = Session.open(latest.id);
   }
 
   const prefs = loadPreferences();
@@ -123,33 +133,39 @@ async function main(): Promise<void> {
   if (!["auto", "on", "off"].includes(sandboxMode)) throw new Error("--sandbox must be auto, on or off");
   const sandbox = Sandbox.create(sandboxMode as SandboxMode, values.network ?? false);
 
-  const instructions = loadInstructions(cwd);
-  const { skills, warnings: skillWarnings } = loadSkills(skillRoots(findRepoRoot(cwd) ?? cwd));
-  const tools = skills.length ? [...defaultTools, createSkillTool(skills)] : defaultTools;
-  sandbox.readOnlyPaths = skills.map((s) => s.dir);
-  const warnings = [...config.warnings, ...skillWarnings];
+  // The project being worked in; /new <folder> in the TUI switches it.
+  let project = loadProject(cwd);
+  sandbox.readOnlyPaths = project.skills.map((s) => s.dir);
+  const warnings = [...config.warnings, ...project.warnings];
 
   // The session being recorded; /sessions and /new in the TUI switch it.
   let session = resumed?.session ?? Session.create(cwd, model, server.name);
   session.recordModel(model, server.name);
   const history = resumed?.messages ?? [];
-  const createAgent = (hooks: AgentHooks) =>
-    new Agent({
-      client: server.client,
-      model,
-      reasoning,
-      cwd,
+  /**
+   * An agent for the current project. The first one continues the resumed
+   * conversation with the startup settings; later ones (a new project) start
+   * empty with the settings in use at that moment.
+   */
+  const createAgent = (hooks: AgentHooks, current?: AgentSettings) => {
+    const { instructions, skills } = project;
+    return new Agent({
+      client: current?.client ?? server.client,
+      model: current?.model ?? model,
+      reasoning: current?.reasoning ?? reasoning,
+      contextSize: current ? current.contextSize : contextSize,
+      history: current ? [] : history,
+      cwd: project.cwd,
       temperature,
       maxSteps,
-      contextSize,
       sandbox,
-      history,
-      tools,
-      systemPrompt: buildSystemPrompt(cwd, { instructions, skills, fastTools: fastTools() }),
-      subagentPrompt: config.subagents ? buildSubagentPrompt(cwd, { instructions, skills }) : undefined,
+      tools: project.tools,
+      systemPrompt: buildSystemPrompt(project.cwd, { instructions, skills, fastTools: fastTools() }),
+      subagentPrompt: config.subagents ? buildSubagentPrompt(project.cwd, { instructions, skills }) : undefined,
       onHistory: (change) => session.record(change),
       ...hooks,
     });
+  };
 
   if (values.print !== undefined) {
     for (const warning of warnings) process.stderr.write(`[warn] ${warning}\n`);
@@ -166,27 +182,39 @@ async function main(): Promise<void> {
     createAgent,
     server,
     endpoints: config.endpoints,
+    project: projectView(project, cwd),
+    switchProject: (folder) => {
+      const dir = resolveFolder(folder, project.cwd);
+      project = loadProject(dir);
+      sandbox.readOnlyPaths = project.skills.map((s) => s.dir);
+      return projectView(project, dir);
+    },
     configFile: config.file,
     warnings,
     rememberedModel: (baseURL) => loadPreferences().models?.[baseURL],
     sandbox,
-    cwd,
     sessions: {
       currentId: () => session.id,
-      list: () => listSessions(cwd, 50),
+      list: () => listSessions(project.cwd, 50),
       open: (id) => {
         const opened = Session.open(id);
         session = opened.session;
         return { messages: opened.messages, model: session.model, endpoint: session.endpoint };
       },
       startNew: (model, endpoint) => {
-        session = Session.create(cwd, model, endpoint);
+        session = Session.create(project.cwd, model, endpoint);
+      },
+      recentProjects: () => {
+        const byFolder = new Map<string, { cwd: string; sessions: number; updated: Date }>();
+        for (const s of listSessions(undefined, 200)) {
+          const entry = byFolder.get(s.cwd);
+          if (entry) entry.sessions++;
+          else byFolder.set(s.cwd, { cwd: s.cwd, sessions: 1, updated: s.updated });
+        }
+        return [...byFolder.values()];
       },
     },
     resumed: history,
-    tools,
-    instructions: instructions.map((f) => displayPath(f.path, cwd)),
-    skills,
     savePreferences: ({ server, model, reasoning }) => {
       if (model) session.recordModel(model, server.name);
       savePreferences({
@@ -197,6 +225,40 @@ async function main(): Promise<void> {
     },
   }).run();
   console.log(`Session ${session.id}. Resume with: agent --resume ${session.id}`);
+}
+
+interface Project {
+  cwd: string;
+  instructions: InstructionFile[];
+  skills: Skill[];
+  tools: ToolDef[];
+  warnings: string[];
+}
+
+/** Everything that depends on the folder being worked in. */
+function loadProject(cwd: string): Project {
+  const instructions = loadInstructions(cwd);
+  const { skills, warnings } = loadSkills(skillRoots(findRepoRoot(cwd) ?? cwd));
+  const tools = skills.length ? [...defaultTools, createSkillTool(skills)] : defaultTools;
+  return { cwd, instructions, skills, tools, warnings };
+}
+
+function projectView(project: Project, cwd: string): ProjectView {
+  return {
+    cwd: project.cwd,
+    instructions: project.instructions.map((f) => displayPath(f.path, cwd)),
+    skills: project.skills,
+    tools: project.tools,
+    warnings: project.warnings,
+  };
+}
+
+/** An existing folder, given relative to `base`, absolute, or with ~/. */
+function resolveFolder(folder: string, base: string): string {
+  const expanded = folder === "~" || folder.startsWith("~/") ? path.join(os.homedir(), folder.slice(1)) : folder;
+  const dir = path.resolve(base, expanded);
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw new Error(`Not a folder: ${folder}`);
+  return dir;
 }
 
 /** A short path for display: relative to the project when nearby, else with ~ for the home folder. */

@@ -21,7 +21,7 @@ Environment:
 How to work:
 - Use the tools to look at the actual code before answering questions about it or changing it.
 - Read a file before editing it. Use edit_file for targeted changes and write_file for new files or full rewrites.
-- File paths are relative to the working directory and must stay inside it.
+- File paths are relative to the working directory. You can only change files inside it. read_file, grep and glob can also read outside it (absolute paths, ../, ~/); the user is asked first, and credential folders are off limits.
 - Shell commands run non-interactively in bash. Prefer quick, targeted commands and avoid ones that wait for input.${fastToolsLine(extras.fastTools)}
 - After making a change, check it when you can, for example by running the build or tests.
 - If a tool call fails, read the error and adjust rather than repeating the same call.
@@ -42,6 +42,7 @@ Environment:
 How to work:
 - Search first (grep, glob), then read only what you need. Ask for several independent lookups in one response: they run in parallel.
 - You can't change files or run commands, and the user doesn't see your work: only your final reply goes back to the agent that asked.
+- Paths outside the working directory can be read too; the user is asked first.
 - Your final reply is the report. Make it concise and specific: answer the question, cite file paths with line numbers, and quote short code snippets where they help. Say what you couldn't find instead of guessing.${contextSections(extras)}`;
 }
 

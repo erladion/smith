@@ -62,6 +62,11 @@ export class Session {
     return this.currentModel;
   }
 
+  /** The folder the session works in. */
+  get cwd(): string {
+    return this.meta.cwd;
+  }
+
   /** The configured endpoint in use when the session was last saved, if it was a named one. */
   get endpoint(): string | undefined {
     return this.currentEndpoint;

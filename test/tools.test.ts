@@ -41,10 +41,41 @@ describe("file tools", () => {
     assert.equal(await fs.readFile(path.join(dir, "b.txt"), "utf8"), "x = $&2\nx = $&2\n");
   });
 
-  test("paths outside the working directory are rejected", async () => {
-    await assert.rejects(run(readFile, { path: "../../etc/passwd" }), /outside the working directory/);
+  test("writes stay inside the working directory, even through a symlink", async () => {
+    await assert.rejects(run(writeFile, { path: "../outside.txt", content: "x" }), /outside the working directory/);
     await fs.symlink(os.tmpdir(), path.join(dir, "escape"));
     await assert.rejects(run(writeFile, { path: "escape/pwned.txt", content: "x" }), /outside the working directory/);
+  });
+
+  test("reads outside the working directory are allowed but ask for approval", async () => {
+    const reason = (tool: ToolDef, input: object) => tool.approvalReason!(tool.schema.parse(input), ctx);
+    assert.equal(await reason(readFile, { path: "sub/a.txt" }), undefined);
+    assert.match((await reason(readFile, { path: "/etc/hostname" }))!, /outside the project/);
+    assert.match((await reason(grep, { pattern: "x", path: "../.." }))!, /outside the project/);
+    assert.match((await reason(glob, { pattern: "*", path: "/usr" }))!, /outside the project/);
+    assert.equal(await reason(grep, { pattern: "x" }), undefined);
+    // Approval is the agent's job; called directly, the tool just reads.
+    assert.match((await run(readFile, { path: "/etc/os-release" })).content, /^1\t/);
+  });
+
+  test("credentials, /proc and agent data are off limits, however they're reached", async () => {
+    const originalHome = process.env.HOME;
+    // Not under /tmp: that is off limits by itself and would hide whether the ~/.ssh rule works.
+    const home = await fs.mkdtemp(path.join(os.homedir(), ".agent-test-home-"));
+    process.env.HOME = home;
+    try {
+      await fs.mkdir(path.join(home, ".ssh"));
+      await fs.writeFile(path.join(home, ".ssh", "id_ed25519"), "PRIVATE");
+      await fs.symlink(path.join(home, ".ssh"), path.join(dir, "keys"));
+      for (const p of ["~/.ssh/id_ed25519", path.join(home, ".ssh/id_ed25519"), "keys/id_ed25519", "/proc/self/environ"]) {
+        await assert.rejects(run(readFile, { path: p }), /off limits/, p);
+      }
+      await assert.rejects(run(grep, { pattern: "PRIVATE", path: "~/.ssh" }), /off limits/);
+      await assert.rejects(run(glob, { pattern: "*", path: "/proc" }), /off limits/);
+    } finally {
+      process.env.HOME = originalHome;
+      await fs.rm(home, { recursive: true, force: true });
+    }
   });
 });
 
@@ -62,7 +93,6 @@ describe("search tools", () => {
     assert.deepEqual(files.content.split("\n").sort(), ["src/app.ts", "src/notes.md"]);
 
     assert.equal((await run(grep, { pattern: "nothing-matches-this" })).content, "No matches.");
-    await assert.rejects(run(grep, { pattern: "x", path: "../.." }), /outside the working directory/);
   });
 
   test("glob lists matching files and skips node_modules", async () => {
