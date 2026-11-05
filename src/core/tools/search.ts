@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import { globToRegExp } from "../glob.js";
 import { resolveInRoot } from "../paths.js";
 import { defineTool, type ToolResult, truncate } from "../tool.js";
 
@@ -57,15 +58,15 @@ export const glob = defineTool({
   readOnly: true,
   summarize: ({ pattern, path: p }) => (p ? `${pattern} in ${p}` : pattern),
   async run({ pattern, path: p }, ctx): Promise<ToolResult> {
+    if (path.isAbsolute(pattern) || pattern.split("/").includes("..")) {
+      return { content: "The pattern must be relative and must not contain '..'. Use path to choose where to search.", isError: true };
+    }
     const base = await resolveInRoot(ctx.cwd, p ?? ".");
+    const regex = globToRegExp(pattern);
     const matches: { file: string; mtime: number }[] = [];
-    const iterator = fs.glob(pattern, {
-      cwd: base,
-      exclude: (entry) => SKIP_DIRS.has(path.basename(entry)),
-    });
-    for await (const rel of iterator) {
-      if (ctx.signal.aborted) break;
-      const abs = path.join(base, rel);
+
+    for await (const { rel, abs } of walk(base, ctx.signal)) {
+      if (!regex.test(rel)) continue;
       const stat = await fs.stat(abs).catch(() => null);
       if (!stat?.isFile()) continue;
       matches.push({ file: path.relative(ctx.cwd, abs), mtime: stat.mtimeMs });
@@ -80,6 +81,30 @@ export const glob = defineTool({
     return { content: shown.join("\n") + more };
   },
 });
+
+const MAX_WALK_ENTRIES = 100_000;
+
+/**
+ * Yields every file and directory under `base` as a slash-separated relative
+ * path. Doesn't follow symlinked directories, so it can't leave `base`.
+ */
+async function* walk(base: string, signal: AbortSignal): AsyncGenerator<{ rel: string; abs: string }> {
+  const stack = [""];
+  let seen = 0;
+  while (stack.length > 0) {
+    const relDir = stack.pop()!;
+    const entries = await fs.readdir(path.join(base, relDir), { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (signal.aborted || ++seen > MAX_WALK_ENTRIES) return;
+      const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) stack.push(rel);
+        continue;
+      }
+      yield { rel, abs: path.join(base, rel) };
+    }
+  }
+}
 
 function ripgrepArgs(input: GrepInput, target: string): string[] {
   const args = ["--line-number", "--no-heading", "--color", "never", "--max-columns", "300", "--max-columns-preview"];

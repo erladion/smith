@@ -1,28 +1,36 @@
 #!/usr/bin/env node
 import { render } from "ink";
-import OpenAI from "openai";
 import { parseArgs } from "node:util";
 import { Agent } from "./core/agent.js";
+import { type Config, EXAMPLE_CONFIG, loadConfig } from "./core/config.js";
 import type { AgentEvent } from "./core/events.js";
 import type { Message } from "./core/history.js";
-import { loadPreferences, savePreferences } from "./core/preferences.js";
+import { loadPreferences, type Preferences, savePreferences } from "./core/preferences.js";
 import { buildSystemPrompt } from "./core/prompt.js";
 import { isReasoningLevel, REASONING_LEVELS, type ReasoningLevel } from "./core/reasoning.js";
+import { Sandbox, type SandboxMode } from "./core/sandbox.js";
 import { Server } from "./core/server.js";
 import { listSessions, Session } from "./core/session.js";
 import { defaultTools } from "./core/tools/index.js";
 import { type AgentHooks, App } from "./ui/App.js";
-import { describeError } from "./ui/errors.js";
+import { describeError } from "./core/errors.js";
 
 const HELP = `Usage: agent [options]
 
 Server:
-  --base-url <url>       OpenAI-compatible endpoint (env AGENT_BASE_URL, default http://localhost:8080/v1)
-  --api-key <key>        API key (env AGENT_API_KEY or OPENAI_API_KEY; llama-server needs none by default)
-  --model <name>         Model (env AGENT_MODEL; default: last used on this server, else the first listed)
+  -e, --endpoint <name>  Use an endpoint from the config file (default: last used, else the config's default)
+  --endpoints            List configured endpoints
+  --base-url <url>       Use this OpenAI-compatible URL instead of a configured endpoint (env AGENT_BASE_URL)
+  --api-key <key>        API key (for --base-url also env AGENT_API_KEY or OPENAI_API_KEY)
+  --model <name>         Model (env AGENT_MODEL; default: last used on this server, else the
+                         endpoint's configured model, else the first listed)
   --reasoning <level>    ${REASONING_LEVELS.join(" | ")} (default: last used, else "default")
   --context-size <n>     Context window in tokens, if the server doesn't report it
   --temperature <n>      Sampling temperature (default: the server's)
+
+Sandbox (shell commands run in bubblewrap):
+  --sandbox <mode>       auto | on | off (default auto: use bwrap if it works, else warn)
+  --network              Allow sandboxed commands to use the network (default: blocked)
 
 Sessions:
   -c, --continue         Resume the most recent session in this directory
@@ -33,17 +41,23 @@ One-shot:
   -p, --print <prompt>   Run one prompt without the TUI and print the answer
   -y, --yes              With --print, allow every tool call without asking
 
-  -h, --help             Show this help`;
+  -h, --help             Show this help
+
+Endpoints are configured in ~/.config/agent/config.json; run --endpoints for an example.`;
 
 async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
+      endpoint: { type: "string", short: "e" },
+      endpoints: { type: "boolean" },
       "base-url": { type: "string" },
       "api-key": { type: "string" },
       model: { type: "string" },
       reasoning: { type: "string" },
       "context-size": { type: "string" },
       temperature: { type: "string" },
+      sandbox: { type: "string" },
+      network: { type: "boolean" },
       continue: { type: "boolean", short: "c" },
       resume: { type: "string", short: "r" },
       sessions: { type: "boolean" },
@@ -62,6 +76,11 @@ async function main(): Promise<void> {
     printSessions(cwd);
     return;
   }
+  const config = loadConfig();
+  if (values.endpoints) {
+    printEndpoints(config);
+    return;
+  }
 
   // Resume first: a resumed session suggests which model to use.
   let resumed: { session: Session; messages: Message[] } | null = null;
@@ -73,30 +92,33 @@ async function main(): Promise<void> {
     resumed = Session.open(latest.id);
   }
 
-  const baseURL = values["base-url"] ?? process.env.AGENT_BASE_URL ?? "http://localhost:8080/v1";
-  const apiKey = values["api-key"] ?? process.env.AGENT_API_KEY ?? process.env.OPENAI_API_KEY ?? "no-key";
-  const client = new OpenAI({ baseURL, apiKey, maxRetries: 1 });
-  const server = new Server(client, baseURL, apiKey);
   const prefs = loadPreferences();
+  const server = chooseServer(values, config, prefs, resumed?.session.endpoint);
 
   const temperature = parseNumber(values.temperature, "--temperature");
   const reasoning = resolveReasoning(values.reasoning, prefs.reasoning);
   const model =
     values.model ??
     process.env.AGENT_MODEL ??
-    (await pickModel(server, [resumed?.session.model, prefs.models?.[baseURL]]));
+    (await server.chooseModel([resumed?.session.model, prefs.models?.[server.baseURL]]));
   const contextSize = parseNumber(values["context-size"], "--context-size") ?? (await server.contextSize(model));
 
-  const session = resumed?.session ?? Session.create(cwd, model);
+  const sandboxMode = values.sandbox ?? "auto";
+  if (!["auto", "on", "off"].includes(sandboxMode)) throw new Error("--sandbox must be auto, on or off");
+  const sandbox = Sandbox.create(sandboxMode as SandboxMode, values.network ?? false);
+
+  const session = resumed?.session ?? Session.create(cwd, model, server.name);
+  session.recordModel(model, server.name);
   const history = resumed?.messages ?? [];
   const createAgent = (hooks: AgentHooks) =>
     new Agent({
-      client,
+      client: server.client,
       model,
       reasoning,
       cwd,
       temperature,
       contextSize,
+      sandbox,
       history,
       tools: defaultTools,
       systemPrompt: buildSystemPrompt(cwd),
@@ -105,7 +127,9 @@ async function main(): Promise<void> {
     });
 
   if (values.print !== undefined) {
-    await runHeadless(createAgent, values.print, values.yes ?? false, baseURL);
+    for (const warning of config.warnings) process.stderr.write(`[warn] ${warning}\n`);
+    process.stderr.write(`[${server.label} · ${model} · ${sandbox.describe()}]\n`);
+    await runHeadless(createAgent, values.print, values.yes ?? false, server.baseURL);
     process.stderr.write(`[session ${session.id}]\n`);
     return;
   }
@@ -114,15 +138,21 @@ async function main(): Promise<void> {
     <App
       createAgent={createAgent}
       server={server}
+      endpoints={config.endpoints}
+      configFile={config.file}
+      warnings={config.warnings}
+      rememberedModel={(baseURL) => loadPreferences().models?.[baseURL]}
+      sandbox={sandbox}
       cwd={cwd}
       sessionId={session.id}
       resumed={history}
       tools={defaultTools}
-      savePreferences={(update) => {
-        if (update.model) session.recordModel(update.model);
+      savePreferences={({ server, model, reasoning }) => {
+        if (model) session.recordModel(model, server.name);
         savePreferences({
-          reasoning: update.reasoning,
-          model: update.model ? { baseURL, id: update.model } : undefined,
+          reasoning,
+          endpoint: model ? server.name : undefined,
+          model: model ? { baseURL: server.baseURL, id: model } : undefined,
         });
       }}
     />,
@@ -144,19 +174,52 @@ function resolveReasoning(flag: string | undefined, saved: ReasoningLevel | unde
   return flag;
 }
 
-/** The first preferred model the server still serves, else the first it lists. */
-async function pickModel(server: Server, preferred: (string | undefined)[]): Promise<string> {
-  let models;
-  try {
-    models = await server.listModels();
-  } catch (err) {
-    throw new Error(`Could not list models at ${server.baseURL}: ${describeError(err, server.baseURL)}\nStart the server or pass --model.`);
+const DEFAULT_BASE_URL = "http://localhost:8080/v1";
+
+/**
+ * Which server to start on: --endpoint, then an explicit URL (--base-url or
+ * AGENT_BASE_URL), then the resumed session's endpoint, the last one used,
+ * the config's default, the first configured, and finally localhost:8080.
+ */
+function chooseServer(
+  flags: { endpoint?: string; "base-url"?: string; "api-key"?: string },
+  config: Config,
+  prefs: Preferences,
+  sessionEndpoint: string | undefined,
+): Server {
+  const keyFlag = flags["api-key"];
+  const find = (name: string | undefined) => (name ? config.endpoints.find((e) => e.name === name) : undefined);
+
+  if (flags.endpoint) {
+    const endpoint = find(flags.endpoint);
+    if (!endpoint) {
+      const known = config.endpoints.map((e) => e.name).join(", ") || "none";
+      throw new Error(`Unknown endpoint "${flags.endpoint}". Configured in ${config.file}: ${known}.`);
+    }
+    return Server.fromEndpoint(endpoint, keyFlag);
   }
-  const ids = new Set(models.map((m) => m.id));
-  const match = preferred.find((id): id is string => id !== undefined && ids.has(id));
-  const chosen = match ?? models[0]?.id;
-  if (!chosen) throw new Error(`${server.baseURL} lists no models. Pass --model.`);
-  return chosen;
+
+  const url = flags["base-url"] ?? process.env.AGENT_BASE_URL;
+  const envKey = keyFlag ?? process.env.AGENT_API_KEY ?? process.env.OPENAI_API_KEY ?? "no-key";
+  if (url) return new Server(url, envKey);
+
+  const endpoint =
+    find(sessionEndpoint) ?? find(prefs.endpoint) ?? find(config.defaultEndpoint) ?? config.endpoints[0];
+  return endpoint ? Server.fromEndpoint(endpoint, keyFlag) : new Server(DEFAULT_BASE_URL, envKey);
+}
+
+function printEndpoints(config: Config): void {
+  if (config.endpoints.length === 0) {
+    console.log(`No endpoints configured. Create ${config.file}, for example:\n\n${EXAMPLE_CONFIG}`);
+    console.log(`\nUse "apiKeyEnv" to read a key from an environment variable instead of storing it in the file.`);
+    return;
+  }
+  console.log(`From ${config.file}:\n`);
+  for (const e of config.endpoints) {
+    const marks = [e.name === config.defaultEndpoint && "default", e.apiKey && "key"].filter(Boolean).join(", ");
+    console.log(`${e.name.padEnd(16)} ${e.baseURL.padEnd(36)} ${(e.model ?? "").padEnd(24)} ${marks}`);
+  }
+  for (const warning of config.warnings) console.log(`\nwarning: ${warning}`);
 }
 
 function printSessions(cwd: string): void {
@@ -167,7 +230,8 @@ function printSessions(cwd: string): void {
   }
   for (const s of sessions) {
     const when = s.updated.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
-    console.log(`${s.id}  ${when.padEnd(17)}  ${s.model.padEnd(24).slice(0, 24)}  ${s.preview}`);
+    const where = s.endpoint ? `${s.endpoint}/${s.model}` : s.model;
+    console.log(`${s.id}  ${when.padEnd(17)}  ${where.padEnd(32).slice(0, 32)}  ${s.preview}`);
   }
 }
 

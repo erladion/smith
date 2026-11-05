@@ -1,33 +1,49 @@
 import { Box, Static, Text, useApp, useInput } from "ink";
-import Spinner from "ink-spinner";
-import TextInput from "ink-text-input";
 import { useCallback, useRef, useState } from "react";
 import type { Agent, ApprovalDecision, ApprovalRequest } from "../core/agent.js";
+import { type Endpoint, EXAMPLE_CONFIG } from "../core/config.js";
 import type { AgentEvent, BlockKind } from "../core/events.js";
 import type { Message } from "../core/history.js";
 import { isReasoningLevel, REASONING_HINTS, REASONING_LEVELS, type ReasoningLevel } from "../core/reasoning.js";
-import type { Server } from "../core/server.js";
+import type { Sandbox } from "../core/sandbox.js";
+import { Server } from "../core/server.js";
 import type { ToolDef } from "../core/tool.js";
 import { type Entry, EntryView, type NewEntry, StreamedText } from "./entries.js";
-import { describeError } from "./errors.js";
+import { describeError } from "../core/errors.js";
 import { Picker, type PickerItem } from "./Picker.js";
 import { historyToEntries } from "./replay.js";
+import { Spinner, TextInput } from "./widgets.js";
 
 export interface AgentHooks {
   onEvent: (event: AgentEvent) => void;
   approve: (req: ApprovalRequest) => Promise<ApprovalDecision>;
 }
 
+export interface PreferenceUpdate {
+  server: Server;
+  model?: string;
+  reasoning?: ReasoningLevel;
+}
+
 interface Props {
   createAgent: (hooks: AgentHooks) => Agent;
+  /** The server the agent starts on. */
   server: Server;
+  /** Endpoints from the config file, for /endpoint. */
+  endpoints: Endpoint[];
+  configFile: string;
+  /** Problems found while loading the config, shown at startup. */
+  warnings: string[];
+  /** The model last used on a server, if remembered. */
+  rememberedModel: (baseURL: string) => string | undefined;
+  sandbox: Sandbox;
   cwd: string;
   sessionId: string;
   /** Conversation restored from a saved session, shown before the prompt. */
   resumed: Message[];
   tools: ToolDef[];
-  /** Remembers the user's model and reasoning choices for next time. */
-  savePreferences: (update: { model?: string; reasoning?: ReasoningLevel }) => void;
+  /** Remembers the user's endpoint, model and reasoning choices for next time. */
+  savePreferences: (update: PreferenceUpdate) => void;
 }
 
 interface LiveBlock {
@@ -42,21 +58,25 @@ interface PendingApproval extends ApprovalRequest {
 }
 
 interface OpenPicker {
-  kind: "model" | "reasoning";
+  kind: "endpoint" | "model" | "reasoning";
   title: string;
   items: PickerItem[];
   current: string;
 }
 
 const HELP = `Commands:
+  /endpoint [name]    pick a configured endpoint, or switch to one by name
   /model [name]       pick a model from the server, or switch to one by name
   /reasoning [level]  pick how much the model thinks: ${REASONING_LEVELS.join(", ")}
+  /network on|off     allow or block network access for sandboxed commands
   /compact            summarize the conversation now to free context
   /clear              start the conversation over
   /exit               quit
 Keys: esc interrupts the agent; ctrl+c quits.`;
 
-export function App({ createAgent, server, cwd, sessionId, resumed, tools, savePreferences }: Props) {
+export function App(props: Props) {
+  const { createAgent, endpoints, configFile, sandbox, cwd, sessionId, resumed, tools, rememberedModel, savePreferences } = props;
+  const [server, setServer] = useState(props.server);
   const { exit } = useApp();
   const nextId = useRef(1);
   const [live, setLive] = useState<LiveBlock | null>(null);
@@ -66,6 +86,7 @@ export function App({ createAgent, server, cwd, sessionId, resumed, tools, saveP
   const [busy, setBusy] = useState(false);
   const [input, setInput] = useState("");
   const [context, setContext] = useState<{ tokens: number; limit?: number } | null>(null);
+  const [network, setNetwork] = useState(sandbox.network);
 
   // The agent is created once, so its callbacks may only touch refs and setters.
   const liveRef = useRef<LiveBlock | null>(null);
@@ -168,7 +189,17 @@ export function App({ createAgent, server, cwd, sessionId, resumed, tools, saveP
   const [reasoning, setReasoning] = useState(agent.reasoning);
 
   const [entries, setEntries] = useState<Entry[]>(() => [
-    { id: 0, kind: "banner", model: agent.model, baseURL: server.baseURL, cwd, session: sessionId, resumed: resumed.length > 0 },
+    {
+      id: 0,
+      kind: "banner",
+      model: agent.model,
+      baseURL: server.label,
+      cwd,
+      session: sessionId,
+      resumed: resumed.length > 0,
+      sandbox: { active: sandbox.active, description: sandbox.describe() },
+    },
+    ...props.warnings.map((text) => ({ id: nextId.current++, kind: "notice", level: "warn", text }) as Entry),
     ...historyToEntries(resumed, tools).map((e) => ({ ...e, id: nextId.current++ }) as Entry),
   ]);
 
@@ -218,7 +249,7 @@ export function App({ createAgent, server, cwd, sessionId, resumed, tools, saveP
     const contextSize = await server.contextSize(id);
     agent.setModel(id, contextSize);
     setModel(id);
-    savePreferences({ model: id });
+    savePreferences({ server, model: id });
     const window = contextSize ? `${contextSize.toLocaleString()}-token context` : "context size unknown";
     push({ kind: "notice", level: "info", text: `Switched to ${id} (${window}).` });
     setActivity(null);
@@ -228,7 +259,7 @@ export function App({ createAgent, server, cwd, sessionId, resumed, tools, saveP
   const switchReasoning = (level: ReasoningLevel) => {
     agent.setReasoning(level);
     setReasoning(level);
-    savePreferences({ reasoning: level });
+    savePreferences({ server, reasoning: level });
     push({ kind: "notice", level: "info", text: `Reasoning: ${level} (${REASONING_HINTS[level]}).` });
   };
 
@@ -259,9 +290,58 @@ export function App({ createAgent, server, cwd, sessionId, resumed, tools, saveP
     }
   };
 
+  const switchEndpoint = async (name: string) => {
+    const endpoint = endpoints.find((e) => e.name === name);
+    if (!endpoint) {
+      const known = endpoints.map((e) => e.name).join(", ") || "none";
+      push({ kind: "notice", level: "error", text: `Unknown endpoint "${name}". Configured: ${known}.` });
+      return;
+    }
+    setBusy(true);
+    setActivity(`Connecting to ${name}…`);
+    try {
+      const next = Server.fromEndpoint(endpoint);
+      const model = await next.chooseModel([rememberedModel(next.baseURL)]);
+      const contextSize = await next.contextSize(model);
+      agent.setModel(model, contextSize, next.client);
+      setServer(next);
+      setModel(model);
+      savePreferences({ server: next, model });
+      const window = contextSize ? `${contextSize.toLocaleString()}-token context` : "context size unknown";
+      push({ kind: "notice", level: "info", text: `Connected to ${next.label}, using ${model} (${window}).` });
+    } catch (err) {
+      push({ kind: "notice", level: "error", text: `Could not switch to ${name}: ${describeError(err, endpoint.baseURL)}` });
+    } finally {
+      setActivity(null);
+      setBusy(false);
+    }
+  };
+
+  const openEndpointPicker = () => {
+    if (endpoints.length === 0) {
+      push({
+        kind: "notice",
+        level: "info",
+        text: `No endpoints are configured. Add them to ${configFile}, for example:\n${EXAMPLE_CONFIG}`,
+      });
+      return;
+    }
+    setPicker({
+      kind: "endpoint",
+      title: "Select an endpoint",
+      current: server.name ?? "",
+      items: endpoints.map((e) => ({
+        value: e.name,
+        label: e.name,
+        hint: e.model ? `${e.baseURL} · ${e.model}` : e.baseURL,
+      })),
+    });
+  };
+
   const onPick = (value: string) => {
     const open = picker;
     setPicker(null);
+    if (open?.kind === "endpoint" && value !== server.name) void switchEndpoint(value);
     if (open?.kind === "model" && value !== agent.model) void switchModel(value);
     if (open?.kind === "reasoning" && isReasoningLevel(value) && value !== agent.reasoning) switchReasoning(value);
   };
@@ -287,8 +367,23 @@ export function App({ createAgent, server, cwd, sessionId, resumed, tools, saveP
           setContext(null);
           push({ kind: "notice", level: "info", text: "Conversation cleared." });
           return;
+        case "/network":
+          if (!sandbox.active) {
+            push({ kind: "notice", level: "warn", text: `There is no sandbox, so commands already have full network access (${sandbox.reason}).` });
+          } else if (arg === "on" || arg === "off") {
+            sandbox.network = arg === "on";
+            setNetwork(sandbox.network);
+            push({ kind: "notice", level: "info", text: `Sandboxed commands now have network ${arg}.` });
+          } else {
+            push({ kind: "notice", level: "info", text: `Network is ${sandbox.network ? "on" : "off"} for sandboxed commands. Use /network on or /network off.` });
+          }
+          return;
         case "/compact":
           await runBusy("Compacting…", (signal) => agent.compactNow(signal));
+          return;
+        case "/endpoint":
+          if (arg) await switchEndpoint(arg);
+          else openEndpointPicker();
           return;
         case "/model":
           if (arg) await switchModel(arg);
@@ -333,7 +428,7 @@ export function App({ createAgent, server, cwd, sessionId, resumed, tools, saveP
       {activity && !approval && (
         <Box marginTop={1}>
           <Text color="yellow">
-            <Spinner type="dots" />
+            <Spinner />
           </Text>
           <Text dimColor> {activity}</Text>
         </Box>
@@ -343,6 +438,12 @@ export function App({ createAgent, server, cwd, sessionId, resumed, tools, saveP
         <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="yellow" paddingX={1}>
           <Text bold>Allow {approval.tool}?</Text>
           <Text>{approval.summary}</Text>
+          {approval.sandbox && (
+            <Text color={approval.sandbox.active ? "green" : "red"}>
+              {approval.sandbox.active ? "✓ " : "⚠ "}
+              {approval.sandbox.description}
+            </Text>
+          )}
           <Text dimColor>
             <Text color="green">y</Text> yes · <Text color="green">a</Text> always allow {approval.tool} this session ·{" "}
             <Text color="red">n</Text> no · <Text color="red">esc</Text> no and interrupt
@@ -369,10 +470,17 @@ export function App({ createAgent, server, cwd, sessionId, resumed, tools, saveP
       )}
 
       <Box paddingX={1}>
-        <Text dimColor>
-          {model} · reasoning {reasoning}
-          {contextLabel}
-          {busy && " · esc to interrupt"}
+        {/* One Text, so a narrow terminal cuts the line off instead of wrapping each piece. */}
+        <Text wrap="truncate-end">
+          {/* The warning goes first so a narrow terminal never cuts it off. */}
+          {!sandbox.active && <Text color="red">unsandboxed · </Text>}
+          <Text dimColor>
+            {server.name && `${server.name} · `}
+            {model} · reasoning {reasoning}
+            {contextLabel}
+            {sandbox.active && ` · sandbox, net ${network ? "on" : "off"}`}
+            {busy && " · esc to interrupt"}
+          </Text>
         </Text>
       </Box>
     </>

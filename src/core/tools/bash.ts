@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { z } from "zod";
+import { Sandbox } from "../sandbox.js";
 import { defineTool, truncate } from "../tool.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -19,13 +20,16 @@ export const bash = defineTool({
     timeout_ms: z.number().int().min(1).max(MAX_TIMEOUT_MS).optional().describe("Timeout in milliseconds"),
   }),
   readOnly: false,
+  sandboxed: true,
   summarize: ({ command }) => command,
   run: ({ command, timeout_ms = DEFAULT_TIMEOUT_MS }, ctx) =>
     new Promise((resolve) => {
+      const spec = (ctx.sandbox ?? Sandbox.none()).spawnSpec(command, ctx.cwd);
       // detached puts the command in its own process group, so killing the
       // group also stops anything it spawned (pipelines, dev servers, ...).
-      const child = spawn("bash", ["-c", command], {
+      const child = spawn(spec.file, spec.args, {
         cwd: ctx.cwd,
+        env: spec.env,
         stdio: ["ignore", "pipe", "pipe"],
         detached: true,
       });
@@ -56,7 +60,7 @@ export const bash = defineTool({
         resolve(result);
       };
 
-      child.on("error", (err) => finish({ content: `Failed to start bash: ${err.message}`, isError: true }));
+      child.on("error", (err) => finish({ content: `Failed to start ${spec.file}: ${err.message}`, isError: true }));
       child.on("close", (code) => {
         const body = truncate(output.trimEnd(), MAX_OUTPUT_CHARS) || "(no output)";
         if (stoppedBy === "timeout") {

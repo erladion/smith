@@ -28,6 +28,17 @@ export async function resolveInRoot(root: string, requested: string): Promise<st
   return target;
 }
 
+/**
+ * Rejects writes into .git. Git config and hooks run code the next time the
+ * user runs git, outside any sandbox, so the agent may not change them.
+ */
+export function assertWritable(root: string, target: string): void {
+  const [first] = path.relative(root, target).split(path.sep);
+  if (first === ".git") {
+    throw new Error("Refusing to modify .git: git runs its config and hooks outside the sandbox. Ask the user to make git changes.");
+  }
+}
+
 function assertInside(root: string, target: string, requested: string): void {
   const rel = path.relative(root, target);
   if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {

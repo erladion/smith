@@ -1,11 +1,14 @@
 import type OpenAI from "openai";
 import { z } from "zod";
+import type { Sandbox } from "./sandbox.js";
 
 export interface ToolContext {
   /** Root directory the agent works in; file tools are confined to it. */
   cwd: string;
   /** Aborted when the user interrupts; long-running tools should stop. */
   signal: AbortSignal;
+  /** Where shell commands run. Defaults to no sandbox. */
+  sandbox?: Sandbox;
 }
 
 export interface ToolResult {
@@ -19,6 +22,8 @@ export interface ToolDef<S extends z.ZodType = z.ZodType> {
   schema: S;
   /** Read-only tools run without asking the user. */
   readOnly: boolean;
+  /** Runs inside the sandbox when one is active (shown in the approval prompt). */
+  sandboxed?: boolean;
   /** One-line description of a call, shown in the transcript and approval prompt. */
   summarize: (input: z.output<S>) => string;
   run: (input: z.output<S>, ctx: ToolContext) => Promise<ToolResult>;

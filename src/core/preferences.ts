@@ -6,6 +6,8 @@ import { isReasoningLevel, type ReasoningLevel } from "./reasoning.js";
 /** Choices remembered between runs. Models are per server, since each serves its own set. */
 export interface Preferences {
   reasoning?: ReasoningLevel;
+  /** Name of the endpoint used last. */
+  endpoint?: string;
   models?: Record<string, string>;
 }
 
@@ -19,6 +21,7 @@ export function loadPreferences(): Preferences {
     const raw = JSON.parse(fs.readFileSync(file(), "utf8")) as Preferences;
     return {
       reasoning: raw.reasoning && isReasoningLevel(raw.reasoning) ? raw.reasoning : undefined,
+      endpoint: typeof raw.endpoint === "string" ? raw.endpoint : undefined,
       models: raw.models && typeof raw.models === "object" ? raw.models : undefined,
     };
   } catch {
@@ -26,9 +29,14 @@ export function loadPreferences(): Preferences {
   }
 }
 
-export function savePreferences(update: { reasoning?: ReasoningLevel; model?: { baseURL: string; id: string } }): void {
+export function savePreferences(update: {
+  reasoning?: ReasoningLevel;
+  endpoint?: string;
+  model?: { baseURL: string; id: string };
+}): void {
   const prefs = loadPreferences();
   if (update.reasoning) prefs.reasoning = update.reasoning;
+  if (update.endpoint) prefs.endpoint = update.endpoint;
   if (update.model) prefs.models = { ...prefs.models, [update.model.baseURL]: update.model.id };
   try {
     fs.mkdirSync(path.dirname(file()), { recursive: true });

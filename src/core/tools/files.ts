@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { resolveInRoot } from "../paths.js";
+import { assertWritable, resolveInRoot } from "../paths.js";
 import { defineTool, truncate } from "../tool.js";
 
 const MAX_OUTPUT_CHARS = 20_000;
@@ -58,6 +58,7 @@ export const writeFile = defineTool({
   summarize: ({ path: p, content }) => `${p} (${content.split("\n").length} lines)`,
   async run({ path: p, content }, ctx) {
     const file = await resolveInRoot(ctx.cwd, p);
+    assertWritable(ctx.cwd, file);
     await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.writeFile(file, content, "utf8");
     return { content: `Wrote ${Buffer.byteLength(content)} bytes to ${p}.` };
@@ -83,6 +84,7 @@ export const editFile = defineTool({
       return { content: "old_string and new_string are identical; nothing to change.", isError: true };
     }
     const file = await resolveInRoot(ctx.cwd, p);
+    assertWritable(ctx.cwd, file);
     const text = await fs.readFile(file, "utf8");
     const count = text.split(old_string).length - 1;
 

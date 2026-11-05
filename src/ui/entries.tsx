@@ -2,7 +2,16 @@ import { Box, Text } from "ink";
 import type { BlockKind, NoticeLevel } from "../core/events.js";
 
 export type Entry =
-  | { id: number; kind: "banner"; model: string; baseURL: string; cwd: string; session: string; resumed: boolean }
+  | {
+      id: number;
+      kind: "banner";
+      model: string;
+      baseURL: string;
+      cwd: string;
+      session: string;
+      resumed: boolean;
+      sandbox: { active: boolean; description: string };
+    }
   | { id: number; kind: "user"; text: string }
   /** `continued` marks a later chunk of the same streamed block (no top margin). */
   | { id: number; kind: BlockKind; text: string; continued: boolean }
@@ -27,6 +36,10 @@ export function EntryView({ entry }: { entry: Entry }) {
           <Text dimColor>
             session {entry.session}
             {entry.resumed && " (resumed)"}
+          </Text>
+          <Text color={entry.sandbox.active ? "green" : "red"}>
+            {entry.sandbox.active ? "✓ " : "⚠ shell commands are "}
+            {entry.sandbox.description}
           </Text>
           <Text dimColor>/help for commands · /model and /reasoning to switch · esc interrupts</Text>
         </Box>

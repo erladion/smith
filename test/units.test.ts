@@ -76,12 +76,13 @@ describe("sessions", () => {
     session.record({ type: "append", message: { role: "assistant", content: "hi" } });
     session.record({ type: "replace", messages: [{ role: "user", content: "summary" }] });
     session.record({ type: "append", message: { role: "assistant", content: "after" } });
-    session.recordModel("m2");
+    session.recordModel("m2", "gpu-box");
     // Simulate a crash in the middle of writing a line.
     fs.appendFileSync(session.file, '{"type":"append","mess');
 
     const { session: reopened, messages } = Session.open(session.id);
     assert.equal(reopened.model, "m2");
+    assert.equal(reopened.endpoint, "gpu-box");
     assert.deepEqual(messages, [
       { role: "user", content: "summary" },
       { role: "assistant", content: "after" },

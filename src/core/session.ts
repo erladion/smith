@@ -7,10 +7,10 @@ import type { HistoryChange, Message } from "./history.js";
 /**
  * Sessions are append-only JSONL logs, one file per conversation:
  *
- *   {"type":"meta", "id", "cwd", "model", "created"}
+ *   {"type":"meta", "id", "cwd", "model", "endpoint"?, "created"}
  *   {"type":"append", "message": {...}}        one per message added
  *   {"type":"replace", "messages": [...]}      after compaction or /clear
- *   {"type":"model", "model"}                  when the user switches model
+ *   {"type":"model", "model", "endpoint"?}     when the user switches model or endpoint
  *
  * Replaying the log rebuilds the conversation (without the system prompt,
  * which is regenerated on resume). Appending instead of rewriting means a
@@ -18,15 +18,16 @@ import type { HistoryChange, Message } from "./history.js";
  */
 
 type Line =
-  | { type: "meta"; id: string; cwd: string; model: string; created: string }
+  | { type: "meta"; id: string; cwd: string; model: string; endpoint?: string; created: string }
   | { type: "append"; message: Message }
   | { type: "replace"; messages: Message[] }
-  | { type: "model"; model: string };
+  | { type: "model"; model: string; endpoint?: string };
 
 export interface SessionInfo {
   id: string;
   cwd: string;
   model: string;
+  endpoint?: string;
   created: string;
   updated: Date;
   file: string;
@@ -42,6 +43,7 @@ export function sessionsDir(): string {
 export class Session {
   private started = false;
   private currentModel: string;
+  private currentEndpoint: string | undefined;
 
   private constructor(
     readonly id: string,
@@ -49,6 +51,7 @@ export class Session {
     private meta: Extract<Line, { type: "meta" }>,
   ) {
     this.currentModel = meta.model;
+    this.currentEndpoint = meta.endpoint;
   }
 
   /** The model in use when the session was last saved. */
@@ -56,8 +59,13 @@ export class Session {
     return this.currentModel;
   }
 
+  /** The configured endpoint in use when the session was last saved, if it was a named one. */
+  get endpoint(): string | undefined {
+    return this.currentEndpoint;
+  }
+
   /** A new session. Its file is created on the first change, so empty sessions leave nothing behind. */
-  static create(cwd: string, model: string): Session {
+  static create(cwd: string, model: string, endpoint?: string): Session {
     const now = new Date();
     const stamp = now.toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
     const id = `${stamp}-${randomBytes(2).toString("hex")}`;
@@ -66,6 +74,7 @@ export class Session {
       id,
       cwd,
       model,
+      endpoint,
       created: now.toISOString(),
     });
   }
@@ -74,9 +83,10 @@ export class Session {
   static open(id: string): { session: Session; messages: Message[] } {
     const file = path.join(sessionsDir(), `${id}.jsonl`);
     if (!fs.existsSync(file)) throw new Error(`No session ${id} in ${sessionsDir()}`);
-    const { meta, messages, model } = readLog(file);
+    const { meta, messages, model, endpoint } = readLog(file);
     const session = new Session(meta.id, file, meta);
     session.currentModel = model;
+    session.currentEndpoint = endpoint;
     session.started = true;
     return { session, messages };
   }
@@ -85,12 +95,13 @@ export class Session {
     this.write(change.type === "append" ? { type: "append", message: change.message } : change);
   }
 
-  recordModel(model: string): void {
-    if (model === this.currentModel) return;
+  recordModel(model: string, endpoint: string | undefined): void {
+    if (model === this.currentModel && endpoint === this.currentEndpoint) return;
     this.currentModel = model;
+    this.currentEndpoint = endpoint;
     // Before the first message there's nothing to resume; the header will carry it.
-    if (this.started) this.write({ type: "model", model });
-    else this.meta.model = model;
+    if (this.started) this.write({ type: "model", model, endpoint });
+    else this.meta = { ...this.meta, model, endpoint };
   }
 
   private write(line: Line): void {
@@ -114,11 +125,11 @@ export function listSessions(cwd?: string): SessionInfo[] {
     if (!name.endsWith(".jsonl")) continue;
     const file = path.join(dir, name);
     try {
-      const { meta, messages, model } = readLog(file);
+      const { meta, messages, model, endpoint } = readLog(file);
       if (cwd && meta.cwd !== cwd) continue;
       const firstUser = messages.find((m) => m.role === "user");
       const preview = typeof firstUser?.content === "string" ? firstUser.content : "";
-      infos.push({ ...meta, model, file, updated: fs.statSync(file).mtime, preview: preview.replace(/\s+/g, " ").slice(0, 80) });
+      infos.push({ ...meta, model, endpoint, file, updated: fs.statSync(file).mtime, preview: preview.replace(/\s+/g, " ").slice(0, 80) });
     } catch {
       // Unreadable or foreign file; skip it.
     }
@@ -126,11 +137,17 @@ export function listSessions(cwd?: string): SessionInfo[] {
   return infos.sort((a, b) => b.updated.getTime() - a.updated.getTime());
 }
 
-function readLog(file: string): { meta: Extract<Line, { type: "meta" }>; messages: Message[]; model: string } {
+function readLog(file: string): {
+  meta: Extract<Line, { type: "meta" }>;
+  messages: Message[];
+  model: string;
+  endpoint: string | undefined;
+} {
   const raw = fs.readFileSync(file, "utf8").split("\n");
   let meta: Extract<Line, { type: "meta" }> | undefined;
   let messages: Message[] = [];
   let model: string | undefined;
+  let endpoint: string | undefined;
   for (const [i, text] of raw.entries()) {
     if (!text.trim()) continue;
     let line: Line;
@@ -144,8 +161,8 @@ function readLog(file: string): { meta: Extract<Line, { type: "meta" }>; message
     if (line.type === "meta") meta = line;
     else if (line.type === "append") messages.push(line.message);
     else if (line.type === "replace") messages = [...line.messages];
-    else model = line.model;
+    else ({ model, endpoint } = line);
   }
   if (!meta) throw new Error(`Session log ${file} has no header`);
-  return { meta, messages, model: model ?? meta.model };
+  return model ? { meta, messages, model, endpoint } : { meta, messages, model: meta.model, endpoint: meta.endpoint };
 }

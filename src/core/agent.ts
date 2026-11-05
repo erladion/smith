@@ -13,6 +13,7 @@ import {
 } from "./context.js";
 import type { AgentEvent } from "./events.js";
 import { type ReasoningLevel, reasoningParams } from "./reasoning.js";
+import { Sandbox } from "./sandbox.js";
 import { type HistoryChange, type Message, messageText, repairHistory } from "./history.js";
 import { stripThinkTags, ThinkTagParser } from "./think.js";
 import { type ToolDef, type ToolResult, toApiTool, truncate } from "./tool.js";
@@ -25,6 +26,8 @@ export interface ApprovalRequest {
   tool: string;
   summary: string;
   input: unknown;
+  /** For tools that run in the sandbox: what the sandbox allows, or that there is none. */
+  sandbox?: { active: boolean; description: string };
 }
 
 export interface AgentOptions {
@@ -41,6 +44,8 @@ export interface AgentOptions {
   maxSteps?: number;
   /** The server's context window in tokens. Enables compaction before it fills up. */
   contextSize?: number;
+  /** Where shell commands run. Defaults to no sandbox. */
+  sandbox?: Sandbox;
   /** Earlier conversation to continue (without the system prompt), e.g. from a saved session. */
   history?: Message[];
   /** Called on every change to the conversation, for persistence. */
@@ -86,6 +91,7 @@ export class Agent {
   private readonly apiTools: OpenAI.Chat.Completions.ChatCompletionTool[];
   private readonly alwaysAllowed = new Set<string>();
   private contextSize: number | undefined;
+  private client: OpenAI;
   private modelId: string;
   private reasoningLevel: ReasoningLevel;
   /** Last exact token count from the server, and how many messages it covered. */
@@ -96,6 +102,7 @@ export class Agent {
     this.toolsByName = new Map(opts.tools.map((t) => [t.name, t]));
     this.apiTools = opts.tools.map(toApiTool);
     this.contextSize = opts.contextSize;
+    this.client = opts.client;
     this.modelId = opts.model;
     this.reasoningLevel = opts.reasoning ?? "default";
   }
@@ -108,8 +115,12 @@ export class Agent {
     return this.reasoningLevel;
   }
 
-  /** Switches model for the following requests; the conversation carries over. */
-  setModel(model: string, contextSize: number | undefined): void {
+  /**
+   * Switches model, and optionally server, for the following requests. The
+   * conversation carries over.
+   */
+  setModel(model: string, contextSize: number | undefined, client?: OpenAI): void {
+    if (client) this.client = client;
     this.modelId = model;
     this.contextSize = contextSize;
     // Token counts from the old model's tokenizer no longer apply.
@@ -290,8 +301,8 @@ export class Agent {
   }
 
   private async summarize(messages: Message[], maxChars: number, signal: AbortSignal): Promise<string> {
-    const { client, temperature } = this.opts;
-    const response = await client.chat.completions.create(
+    const { temperature } = this.opts;
+    const response = await this.client.chat.completions.create(
       {
         model: this.modelId,
         // A summary doesn't need deep thought; keep it quick unless the user opted out of reasoning settings.
@@ -325,8 +336,8 @@ export class Agent {
   // ---- model calls ----
 
   private async streamResponse(signal: AbortSignal): Promise<StreamedResponse> {
-    const { client, temperature, onEvent: emit } = this.opts;
-    const stream = await client.chat.completions.create(
+    const { temperature, onEvent: emit } = this.opts;
+    const stream = await this.client.chat.completions.create(
       {
         model: this.modelId,
         ...reasoningParams(this.reasoningLevel),
@@ -426,7 +437,13 @@ export class Agent {
     const summary = tool.summarize(input);
 
     if (!tool.readOnly && !this.alwaysAllowed.has(tool.name)) {
-      const decision = await this.opts.approve({ tool: tool.name, summary, input });
+      const sandbox = this.opts.sandbox ?? Sandbox.none();
+      const decision = await this.opts.approve({
+        tool: tool.name,
+        summary,
+        input,
+        sandbox: tool.sandboxed ? { active: sandbox.active, description: sandbox.describe() } : undefined,
+      });
       if (decision === "deny" || signal.aborted) {
         return fail("The user declined this tool call. Ask them how they want to proceed.", summary);
       }
@@ -436,7 +453,7 @@ export class Agent {
     emit({ type: "tool_start", id: call.id, name: tool.name, summary });
     let result: ToolResult;
     try {
-      result = await tool.run(input, { cwd: this.opts.cwd, signal });
+      result = await tool.run(input, { cwd: this.opts.cwd, signal, sandbox: this.opts.sandbox });
     } catch (err) {
       result = { content: err instanceof Error ? err.message : String(err), isError: true };
     }

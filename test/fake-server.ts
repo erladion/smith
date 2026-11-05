@@ -15,15 +15,22 @@ export interface FakeServer {
   script: Reply[];
   /** Request bodies received. */
   requests: Record<string, any>[];
+  /** Model ids served at GET /v1/models; null makes that endpoint return 404. */
+  models: string[] | null;
   close: () => Promise<void>;
 }
 
 export async function startFakeServer(): Promise<FakeServer> {
-  const state = { script: [] as Reply[], requests: [] as Record<string, any>[] };
+  const state = { script: [] as Reply[], requests: [] as Record<string, any>[], models: ["fake"] as string[] | null };
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
+      if (req.method === "GET" && req.url?.startsWith("/v1/models")) {
+        res.writeHead(state.models ? 200 : 404, { "content-type": "application/json" });
+        res.end(JSON.stringify(state.models ? { object: "list", data: state.models.map((id) => ({ id, object: "model" })) } : { error: { message: "not found" } }));
+        return;
+      }
       state.requests.push(JSON.parse(body));
       const reply = state.script.shift();
       if (!reply) {
@@ -73,6 +80,12 @@ export async function startFakeServer(): Promise<FakeServer> {
     },
     set requests(r) {
       state.requests = r;
+    },
+    get models() {
+      return state.models;
+    },
+    set models(m) {
+      state.models = m;
     },
     close: () => new Promise((r) => server.close(() => r())),
   };

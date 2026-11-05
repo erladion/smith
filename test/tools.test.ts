@@ -69,6 +69,30 @@ describe("search tools", () => {
     assert.doesNotMatch(res.content, /node_modules/);
     assert.equal((await run(glob, { pattern: "**/*.nope" })).content, "No files matched.");
   });
+
+  test("glob patterns can't leave the working directory", async () => {
+    for (const pattern of ["../*", "src/../../*", "/etc/*"]) {
+      const res = await run(glob, { pattern });
+      assert.equal(res.isError, true, pattern);
+    }
+  });
+
+  test("glob syntax", async () => {
+    await run(writeFile, { path: "g/a.test.ts", content: "" });
+    await run(writeFile, { path: "g/deep/b.test.js", content: "" });
+    await run(writeFile, { path: "g/c.md", content: "" });
+    const res = await run(glob, { pattern: "g/**/*.test.{ts,js}" });
+    assert.deepEqual(res.content.split("\n").sort(), ["g/a.test.ts", "g/deep/b.test.js"]);
+    assert.equal((await run(glob, { pattern: "g/?.md" })).content, "g/c.md");
+    assert.equal((await run(glob, { pattern: "*.md" })).content, "No files matched.", "no slash means top level only");
+  });
+});
+
+describe("write protection", () => {
+  test("file tools refuse to write into .git", async () => {
+    await assert.rejects(run(writeFile, { path: ".git/hooks/pre-commit", content: "evil" }), /Refusing to modify \.git/);
+    await assert.rejects(run(editFile, { path: ".git/config", old_string: "a", new_string: "b" }), /Refusing to modify \.git/);
+  });
 });
 
 describe("bash tool", () => {
