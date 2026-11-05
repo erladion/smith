@@ -1,0 +1,107 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { z } from "zod";
+import { resolveInRoot } from "../paths.js";
+import { defineTool, truncate } from "../tool.js";
+
+const MAX_OUTPUT_CHARS = 20_000;
+const DEFAULT_LINE_LIMIT = 500;
+const MAX_LINE_CHARS = 1_000;
+
+export const readFile = defineTool({
+  name: "read_file",
+  description:
+    "Read a text file. Returns lines prefixed with their 1-based line numbers. " +
+    `Reads up to ${DEFAULT_LINE_LIMIT} lines by default; use offset and limit for larger files.`,
+  schema: z.object({
+    path: z.string().describe("File path, relative to the working directory"),
+    offset: z.number().int().min(1).optional().describe("First line to read (1-based)"),
+    limit: z.number().int().min(1).optional().describe("Maximum number of lines to read"),
+  }),
+  readOnly: true,
+  summarize: ({ path: p, offset, limit }) =>
+    offset || limit ? `${p} (lines ${offset ?? 1}-${(offset ?? 1) + (limit ?? DEFAULT_LINE_LIMIT) - 1})` : p,
+  async run({ path: p, offset = 1, limit = DEFAULT_LINE_LIMIT }, ctx) {
+    const file = await resolveInRoot(ctx.cwd, p);
+    const text = await fs.readFile(file, "utf8");
+    if (text.includes("\0")) return { content: `${p} looks like a binary file.`, isError: true };
+
+    const lines = text.split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    if (lines.length === 0) return { content: `${p} is empty.` };
+    if (offset > lines.length) {
+      return { content: `${p} has only ${lines.length} lines.`, isError: true };
+    }
+
+    const slice = lines.slice(offset - 1, offset - 1 + limit);
+    const body = slice
+      .map((line, i) => {
+        const shown = line.length > MAX_LINE_CHARS ? `${line.slice(0, MAX_LINE_CHARS)}… [line truncated]` : line;
+        return `${offset + i}\t${shown}`;
+      })
+      .join("\n");
+    const end = offset + slice.length - 1;
+    const footer = end < lines.length ? `\n\n[Showing lines ${offset}-${end} of ${lines.length}]` : "";
+    return { content: truncate(body, MAX_OUTPUT_CHARS) + footer };
+  },
+});
+
+export const writeFile = defineTool({
+  name: "write_file",
+  description:
+    "Create a file or overwrite it completely. Prefer edit_file for changes to existing files.",
+  schema: z.object({
+    path: z.string().describe("File path, relative to the working directory"),
+    content: z.string().describe("The full file contents"),
+  }),
+  readOnly: false,
+  summarize: ({ path: p, content }) => `${p} (${content.split("\n").length} lines)`,
+  async run({ path: p, content }, ctx) {
+    const file = await resolveInRoot(ctx.cwd, p);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, content, "utf8");
+    return { content: `Wrote ${Buffer.byteLength(content)} bytes to ${p}.` };
+  },
+});
+
+export const editFile = defineTool({
+  name: "edit_file",
+  description:
+    "Replace an exact string in a file. old_string must match the file exactly, including " +
+    "whitespace and indentation, and must occur exactly once unless replace_all is true. " +
+    "Read the file first so the match is exact.",
+  schema: z.object({
+    path: z.string().describe("File path, relative to the working directory"),
+    old_string: z.string().min(1).describe("Exact text to replace"),
+    new_string: z.string().describe("Replacement text"),
+    replace_all: z.boolean().optional().describe("Replace every occurrence instead of exactly one"),
+  }),
+  readOnly: false,
+  summarize: ({ path: p, replace_all }) => (replace_all ? `${p} (all occurrences)` : p),
+  async run({ path: p, old_string, new_string, replace_all }, ctx) {
+    if (old_string === new_string) {
+      return { content: "old_string and new_string are identical; nothing to change.", isError: true };
+    }
+    const file = await resolveInRoot(ctx.cwd, p);
+    const text = await fs.readFile(file, "utf8");
+    const count = text.split(old_string).length - 1;
+
+    if (count === 0) {
+      return { content: `old_string was not found in ${p}. Read the file and copy the text exactly.`, isError: true };
+    }
+    if (count > 1 && !replace_all) {
+      return {
+        content: `old_string occurs ${count} times in ${p}. Include more surrounding text to make it unique, or set replace_all.`,
+        isError: true,
+      };
+    }
+
+    // split/join and slice avoid String.replace's special `$` patterns.
+    const updated = replace_all
+      ? text.split(old_string).join(new_string)
+      : text.slice(0, text.indexOf(old_string)) + new_string + text.slice(text.indexOf(old_string) + old_string.length);
+    await fs.writeFile(file, updated, "utf8");
+    const replaced = replace_all ? count : 1;
+    return { content: `Replaced ${replaced} occurrence${replaced === 1 ? "" : "s"} in ${p}.` };
+  },
+});
