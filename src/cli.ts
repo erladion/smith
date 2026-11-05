@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { render } from "ink";
 import { parseArgs } from "node:util";
 import { Agent } from "./core/agent.js";
 import { type Config, EXAMPLE_CONFIG, loadConfig } from "./core/config.js";
@@ -12,7 +11,7 @@ import { Sandbox, type SandboxMode } from "./core/sandbox.js";
 import { Server } from "./core/server.js";
 import { listSessions, Session } from "./core/session.js";
 import { defaultTools } from "./core/tools/index.js";
-import { type AgentHooks, App } from "./ui/App.js";
+import { type AgentHooks, TuiApp } from "./ui/app.js";
 import { describeError } from "./core/errors.js";
 
 const HELP = `Usage: agent [options]
@@ -134,30 +133,30 @@ async function main(): Promise<void> {
     return;
   }
 
-  const app = render(
-    <App
-      createAgent={createAgent}
-      server={server}
-      endpoints={config.endpoints}
-      configFile={config.file}
-      warnings={config.warnings}
-      rememberedModel={(baseURL) => loadPreferences().models?.[baseURL]}
-      sandbox={sandbox}
-      cwd={cwd}
-      sessionId={session.id}
-      resumed={history}
-      tools={defaultTools}
-      savePreferences={({ server, model, reasoning }) => {
-        if (model) session.recordModel(model, server.name);
-        savePreferences({
-          reasoning,
-          endpoint: model ? server.name : undefined,
-          model: model ? { baseURL: server.baseURL, id: model } : undefined,
-        });
-      }}
-    />,
-  );
-  await app.waitUntilExit();
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("The interactive UI needs a terminal. Use -p <prompt> for non-interactive runs.");
+  }
+  await new TuiApp({
+    createAgent,
+    server,
+    endpoints: config.endpoints,
+    configFile: config.file,
+    warnings: config.warnings,
+    rememberedModel: (baseURL) => loadPreferences().models?.[baseURL],
+    sandbox,
+    cwd,
+    sessionId: session.id,
+    resumed: history,
+    tools: defaultTools,
+    savePreferences: ({ server, model, reasoning }) => {
+      if (model) session.recordModel(model, server.name);
+      savePreferences({
+        reasoning,
+        endpoint: model ? server.name : undefined,
+        model: model ? { baseURL: server.baseURL, id: model } : undefined,
+      });
+    },
+  }).run();
   console.log(`Session ${session.id}. Resume with: agent --resume ${session.id}`);
 }
 

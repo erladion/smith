@@ -1,14 +1,14 @@
 import { SUMMARY_PREFIX } from "../core/context.js";
 import { type Message, messageText } from "../core/history.js";
 import { describeCall, type ToolDef } from "../core/tool.js";
-import type { NewEntry } from "./entries.js";
+import type { Entry } from "./entries.js";
 
 /** Rebuilds transcript entries from a saved conversation, so a resumed session shows its history. */
-export function historyToEntries(messages: readonly Message[], tools: ToolDef[]): NewEntry[] {
+export function historyToEntries(messages: readonly Message[], tools: ToolDef[]): Entry[] {
   const results = new Map<string, string>();
   for (const m of messages) if (m.role === "tool") results.set(m.tool_call_id, messageText(m));
 
-  const entries: NewEntry[] = [];
+  const entries: Entry[] = [];
   for (const m of messages) {
     if (m.role === "user") {
       const text = messageText(m);
@@ -21,7 +21,7 @@ export function historyToEntries(messages: readonly Message[], tools: ToolDef[])
       }
     } else if (m.role === "assistant") {
       const text = messageText(m).trim();
-      if (text) entries.push({ kind: "text", text, continued: false });
+      if (text) entries.push({ kind: "text", text });
       for (const call of m.tool_calls ?? []) {
         if (call.type !== "function") continue;
         const output = results.get(call.id) ?? "";

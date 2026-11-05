@@ -29,7 +29,7 @@ export const grep = defineTool({
   schema: grepSchema,
   readOnly: true,
   summarize: ({ pattern, path: p, glob }) =>
-    [JSON.stringify(pattern), p && `in ${p}`, glob && `(${glob})`].filter(Boolean).join(" "),
+    [`/${pattern}/`, p && `in ${p}`, glob && `(${glob})`].filter(Boolean).join(" "),
   async run(input, ctx) {
     const target = input.path ? path.relative(ctx.cwd, await resolveInRoot(ctx.cwd, input.path)) || "." : ".";
     const rg = await runSearch("rg", ripgrepArgs(input, target), ctx.cwd, ctx.signal);

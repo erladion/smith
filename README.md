@@ -10,7 +10,19 @@ A small agentic coding harness with a terminal UI. It talks to any OpenAI-compat
 - Recommended: `bubblewrap` for the shell sandbox (`sudo dnf install bubblewrap`, in RHEL 9 BaseOS)
 - Optional: `ripgrep` for faster search (EPEL); falls back to grep
 
-npm dependencies are kept to `openai`, `zod`, `ink` and `react`.
+The only npm runtime dependencies are `openai` and `zod`, neither of which has dependencies of its own. The terminal UI is written from scratch.
+
+## Single binary
+
+`npm run build:binary` produces `build/agent`: one executable (about 150 MB) containing Node.js
+and the bundled app. Copy it to the target machine and run it; it needs no Node, npm or
+`node_modules` there.
+
+- Building needs Node 26 or newer (for `node --build-sea`). The target needs no Node at all.
+- The binary is for the OS and CPU it was built on, e.g. Linux x64. It needs glibc 2.28 or
+  newer (RHEL 9 has 2.34) and `libatomic`, which minimal RHEL installs may lack:
+  `sudo dnf install libatomic`.
+- bubblewrap is still needed on the target for the shell sandbox.
 
 ## Running against llama.cpp
 
@@ -79,7 +91,23 @@ configured endpoint they weren't set for. The file is only read, never written.
 | `/clear` | start over |
 | `/help`, `/exit` | |
 
-Esc interrupts the agent. The last endpoint, model (per server) and reasoning level are
+Enter sends, ↑/↓ recall earlier input, Esc interrupts the agent and Ctrl+C quits. For a new line
+in your message use Shift+Enter, `\` then Enter, or Ctrl+J; pastes may span several lines.
+
+Shift+Enter needs a terminal that reports it separately from Enter. The agent asks for the
+kitty keyboard protocol, which kitty, WezTerm, Ghostty, foot, Alacritty and recent iTerm2
+support. If Shift+Enter sends your message instead, map it to the same key code yourself:
+
+- Windows Terminal (`settings.json`, under `"actions"`):
+  `{ "command": { "action": "sendInput", "input": "\u001b[13;2u" }, "keys": "shift+enter" }`
+- VS Code (`keybindings.json`):
+  `{ "key": "shift+enter", "command": "workbench.action.terminal.sendSequence", "args": { "text": "\u001b[13;2u" }, "when": "terminalFocus" }`
+
+Programs that don't understand that code may show it as text when you press Shift+Enter; if that
+bothers you in your shell, send `"\\\r"` (backslash, Enter) instead, which the agent also treats
+as a new line and bash treats as a line continuation.
+
+The last endpoint, model (per server) and reasoning level are
 remembered in `~/.config/agent/preferences.json`, which the agent writes itself.
 
 ### Reasoning levels
@@ -121,7 +149,7 @@ src/core/think.ts        streaming <think> tag parser
 src/core/sandbox.ts      bubblewrap sandbox for shell commands
 src/core/glob.ts         glob matching for the glob tool
 src/core/tools/          read_file, grep, glob, write_file, edit_file, bash
-src/ui/                  Ink (React) TUI, model/reasoning picker, session replay
+src/ui/                  terminal UI: renderer, Markdown, keys, input editor, pickers
 src/cli.tsx              flags, model selection, TUI or headless mode
 test/                    unit tests, and loop tests against a fake streaming server
 ```
@@ -157,4 +185,5 @@ later, and with the network on, commands can reach services on localhost.
 
 ## Scripts
 
-`npm run dev` (run from source), `npm test`, `npm run typecheck`, `npm run build` (writes `dist/`).
+`npm run dev` (run from source), `npm test`, `npm run typecheck`, `npm run build` (writes `dist/`),
+`npm run build:binary` (writes `build/agent`).
