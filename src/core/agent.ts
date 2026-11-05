@@ -12,12 +12,13 @@ import {
   trimOldToolResults,
 } from "./context.js";
 import type { DiffLine } from "./diff.js";
-import type { AgentEvent } from "./events.js";
+import type { AgentEvent, DoneReason } from "./events.js";
 import { type ReasoningLevel, reasoningParams } from "./reasoning.js";
 import { Sandbox } from "./sandbox.js";
 import { type HistoryChange, type Message, messageText, repairHistory } from "./history.js";
 import { stripThinkTags, ThinkTagParser } from "./think.js";
 import { type ToolDef, type ToolResult, toApiTool, truncate } from "./tool.js";
+import { createTaskTool, type TaskInput } from "./tools/task.js";
 import { Checkpoint, restore } from "./undo.js";
 
 type AssistantMessage = OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam;
@@ -45,6 +46,7 @@ export interface UndoResult {
 }
 
 const MAX_UNDO = 20;
+const MAX_REPORT_CHARS = 8_000;
 
 export interface AgentOptions {
   client: OpenAI;
@@ -62,6 +64,11 @@ export interface AgentOptions {
   contextSize?: number;
   /** Where shell commands run. Defaults to no sandbox. */
   sandbox?: Sandbox;
+  /**
+   * System prompt for sub-agents. When set, the agent gets a `task` tool that
+   * runs a sub-agent with this prompt and the read-only tools.
+   */
+  subagentPrompt?: string;
   /** Earlier conversation to continue (without the system prompt), e.g. from a saved session. */
   history?: Message[];
   /** Called on every change to the conversation, for persistence. */
@@ -108,6 +115,8 @@ export class Agent {
   private readonly alwaysAllowed = new Set<string>();
   /** Recent turns, newest last: where each started in the history and what it changed. */
   private turns: { start: number; prompt: string; checkpoint: Checkpoint }[] = [];
+  /** Messages typed while the agent works, delivered at the next safe point. */
+  private queued: string[] = [];
   private contextSize: number | undefined;
   private client: OpenAI;
   private modelId: string;
@@ -117,8 +126,11 @@ export class Agent {
 
   constructor(private readonly opts: AgentOptions) {
     this.history = [{ role: "system", content: opts.systemPrompt }, ...repairHistory(opts.history ?? [])];
-    this.toolsByName = new Map(opts.tools.map((t) => [t.name, t]));
-    this.apiTools = opts.tools.map(toApiTool);
+    const tools = opts.subagentPrompt
+      ? [...opts.tools, createTaskTool((input, ctx) => this.runSubagent(input, ctx.signal))]
+      : opts.tools;
+    this.toolsByName = new Map(tools.map((t) => [t.name, t]));
+    this.apiTools = tools.map(toApiTool);
     this.contextSize = opts.contextSize;
     this.client = opts.client;
     this.modelId = opts.model;
@@ -173,6 +185,26 @@ export class Agent {
     this.emitContext();
   }
 
+  /**
+   * Queues a message typed while the agent works. It is handed to the model
+   * between tool calls, or after the current reply, within the running turn.
+   */
+  queue(text: string): void {
+    this.queued.push(text);
+  }
+
+  /** Queued messages not yet delivered. */
+  get queuedMessages(): readonly string[] {
+    return this.queued;
+  }
+
+  /** Removes and returns undelivered messages (e.g. after an interruption, to give them back). */
+  takeQueued(): string[] {
+    const taken = this.queued;
+    this.queued = [];
+    return taken;
+  }
+
   /** Whether /undo has something to undo. */
   get canUndo(): boolean {
     return this.turns.length > 0;
@@ -225,6 +257,7 @@ export class Agent {
     let retriedOverflow = false;
 
     for (let step = 0; step < maxSteps; step++) {
+      if (step > 0) this.deliverQueued();
       await this.maybeCompact(signal);
 
       let response: StreamedResponse;
@@ -251,6 +284,8 @@ export class Agent {
       this.emitContext();
 
       if (response.toolCalls.length === 0) {
+        // Something you typed while it answered: keep going so the model sees it.
+        if (this.queued.length > 0 && response.finishReason !== "length") continue;
         if (response.finishReason === "length") {
           emit({ type: "notice", level: "warn", text: "The response hit the server's token limit and was cut off." });
           emit({ type: "done", reason: "length" });
@@ -262,24 +297,95 @@ export class Agent {
 
       // Every tool call needs a matching tool message, even when the user
       // interrupts partway, or the next request will be rejected.
-      for (const call of response.toolCalls) {
-        const result = signal.aborted
-          ? { content: "Interrupted by the user before this tool ran.", isError: true }
-          : await this.runTool(call, signal);
+      const results = await this.runTools(response.toolCalls, signal);
+      response.toolCalls.forEach((call, i) => {
+        const result = results[i]!;
         this.append({
           role: "tool",
           tool_call_id: call.id,
           content: result.isError ? `Error: ${result.content}` : result.content,
         });
-      }
+      });
       if (signal.aborted) {
         emit({ type: "done", reason: "interrupted" });
         return;
       }
     }
 
-    emit({ type: "notice", level: "warn", text: `Stopped after ${maxSteps} model calls without a final answer.` });
+    emit({
+      type: "notice",
+      level: "warn",
+      text: `Stopped after ${maxSteps} model calls without a final answer. Send a message (e.g. "continue") to let it go on, or raise maxSteps in the config file.`,
+    });
     emit({ type: "done", reason: "max_steps" });
+  }
+
+  /** Hands queued messages to the model as one user message. */
+  private deliverQueued(): void {
+    if (this.queued.length === 0) return;
+    const texts = this.takeQueued();
+    for (const text of texts) this.opts.onEvent({ type: "user_message", text });
+    this.append({ role: "user", content: texts.join("\n\n") });
+  }
+
+  /**
+   * Runs a response's tool calls, results in call order. Consecutive
+   * read-only calls run in parallel; anything that may need approval runs on
+   * its own, so prompts never overlap.
+   */
+  private async runTools(calls: ToolCall[], signal: AbortSignal): Promise<ToolResult[]> {
+    const results: ToolResult[] = [];
+    const interrupted = { content: "Interrupted by the user before this tool ran.", isError: true };
+    const readOnly = (call: ToolCall) => this.toolsByName.get(call.name)?.readOnly === true;
+    let i = 0;
+    while (i < calls.length) {
+      if (signal.aborted) {
+        results.push(interrupted);
+        i++;
+        continue;
+      }
+      let end = i + 1;
+      if (readOnly(calls[i]!)) while (end < calls.length && readOnly(calls[end]!)) end++;
+      results.push(...(await Promise.all(calls.slice(i, end).map((call) => this.runTool(call, signal)))));
+      i = end;
+    }
+    return results;
+  }
+
+  /** Runs a sub-agent for the `task` tool and returns its final report. */
+  private async runSubagent({ description, prompt }: TaskInput, signal: AbortSignal): Promise<ToolResult> {
+    const emit = this.opts.onEvent;
+    let reason: DoneReason | undefined;
+    const child = new Agent({
+      client: this.client,
+      model: this.modelId,
+      reasoning: this.reasoningLevel,
+      cwd: this.opts.cwd,
+      temperature: this.opts.temperature,
+      maxSteps: this.opts.maxSteps,
+      contextSize: this.contextSize,
+      sandbox: this.opts.sandbox,
+      // Read-only tools only (which also rules out nested sub-agents).
+      tools: this.opts.tools.filter((t) => t.readOnly),
+      systemPrompt: this.opts.subagentPrompt!,
+      approve: async () => "deny",
+      onEvent: (event) => {
+        if (event.type === "tool_start") emit({ type: "activity", text: `${description} › ${event.name} ${event.summary}` });
+        else if (event.type === "done") reason = event.reason;
+      },
+    });
+    emit({ type: "activity", text: `${description} › thinking…` });
+    try {
+      await child.send(prompt, signal);
+    } catch (err) {
+      return { content: `The sub-agent failed: ${err instanceof Error ? err.message : String(err)}`, isError: true };
+    }
+    if (reason === "interrupted") return { content: "The sub-agent was interrupted by the user.", isError: true };
+
+    const last = [...child.messages].reverse().find((m) => m.role === "assistant" && messageText(m).trim());
+    let report = last ? messageText(last).trim() : "The sub-agent finished without a report.";
+    if (reason === "max_steps") report += "\n\n[The sub-agent hit its step limit before finishing; this report may be incomplete.]";
+    return { content: truncate(report, MAX_REPORT_CHARS) };
   }
 
   // ---- context management ----
@@ -401,6 +507,9 @@ export class Agent {
         tools: this.apiTools,
         stream: true,
         stream_options: { include_usage: true },
+        // Lets the model ask for several tools at once; llama.cpp only allows
+        // one per response unless asked.
+        parallel_tool_calls: true,
         ...(temperature !== undefined && { temperature }),
       },
       { signal },

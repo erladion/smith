@@ -52,6 +52,13 @@ describe("config file", () => {
     }
   });
 
+  test("maxSteps is read and checked", () => {
+    assert.equal(loadConfig(write("steps.json", { maxSteps: 120 })).maxSteps, 120);
+    assert.equal(loadConfig(write("nosteps.json", {})).maxSteps, undefined);
+    assert.throws(() => loadConfig(write("badsteps.json", { maxSteps: 0 })), /Invalid[\s\S]*maxSteps/);
+    assert.throws(() => loadConfig(write("strsteps.json", { maxSteps: "50" })), /Invalid[\s\S]*maxSteps/);
+  });
+
   test("rejects invalid files with a useful message", () => {
     assert.throws(() => loadConfig(write("bad.json", "{ nope")), /not valid JSON/);
     assert.throws(() => loadConfig(write("url.json", { endpoints: { a: { baseURL: "not a url" } } })), /Invalid[\s\S]*baseURL/);

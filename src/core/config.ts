@@ -8,6 +8,7 @@ import { z } from "zod";
  *
  *   {
  *     "default": "local",
+ *     "maxSteps": 50,
  *     "endpoints": {
  *       "local": { "baseURL": "http://localhost:8080/v1" },
  *       "gpu-box": {
@@ -34,6 +35,8 @@ const EndpointSchema = z
 
 const ConfigSchema = z.strictObject({
   default: z.string().optional(),
+  maxSteps: z.number().int().min(1).max(10_000).optional().describe("Model calls allowed per message before the agent stops"),
+  subagents: z.boolean().optional().describe("Give the model the task tool for read-only sub-agents (default true)"),
   endpoints: z.record(z.string(), EndpointSchema).default({}),
 });
 
@@ -49,12 +52,17 @@ export interface Config {
   file: string;
   endpoints: Endpoint[];
   defaultEndpoint?: string;
+  /** Model calls allowed per message you send. */
+  maxSteps?: number;
+  /** Whether the model gets the task tool (sub-agents). */
+  subagents: boolean;
   /** Problems worth telling the user about that don't stop the agent. */
   warnings: string[];
 }
 
 export const EXAMPLE_CONFIG = `{
   "default": "local",
+  "maxSteps": 50,
   "endpoints": {
     "local": { "baseURL": "http://localhost:8080/v1" },
     "gpu-box": {
@@ -77,7 +85,7 @@ export function loadConfig(file = configPath()): Config {
   try {
     raw = fs.readFileSync(file, "utf8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { file, endpoints: [], warnings: [] };
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { file, endpoints: [], subagents: true, warnings: [] };
     throw err;
   }
 
@@ -110,5 +118,5 @@ export function loadConfig(file = configPath()): Config {
     warnings.push(`${file} contains API keys but other users can read it. Run: chmod 600 ${file}`);
   }
 
-  return { file, endpoints, defaultEndpoint: config.default, warnings };
+  return { file, endpoints, defaultEndpoint: config.default, maxSteps: config.maxSteps, subagents: config.subagents ?? true, warnings };
 }

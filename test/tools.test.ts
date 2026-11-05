@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import { existsSync, mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { bash } from "../src/core/tools/bash.js";
 import { editFile, readFile, writeFile } from "../src/core/tools/files.js";
 import { glob, grep } from "../src/core/tools/search.js";
+import { buildSystemPrompt } from "../src/core/prompt.js";
+import { fastTools, resetFastTools } from "../src/core/toolchain.js";
 import type { ToolContext, ToolDef } from "../src/core/tool.js";
 
 let dir: string;
@@ -85,6 +88,45 @@ describe("search tools", () => {
     assert.deepEqual(res.content.split("\n").sort(), ["g/a.test.ts", "g/deep/b.test.js"]);
     assert.equal((await run(glob, { pattern: "g/?.md" })).content, "g/c.md");
     assert.equal((await run(glob, { pattern: "*.md" })).content, "No files matched.", "no slash means top level only");
+  });
+});
+
+describe("fast tools", () => {
+  const withoutRipgrep = async (fn: () => Promise<void>) => {
+    const original = process.env.PATH;
+    process.env.PATH = "/usr/bin:/bin"; // a PATH without ~/.cargo/bin etc.
+    resetFastTools();
+    try {
+      await fn();
+    } finally {
+      process.env.PATH = original;
+      resetFastTools();
+    }
+  };
+
+  test("with ripgrep, glob skips what .gitignore ignores", { skip: !fastTools().rg && "rg not installed" }, async () => {
+    mkdirSync(path.join(dir, ".git"), { recursive: true });
+    await run(writeFile, { path: ".gitignore", content: "generated/\n" });
+    await run(writeFile, { path: "generated/out.ts", content: "" });
+    await run(writeFile, { path: "kept/in.ts", content: "" });
+    const res = await run(glob, { pattern: "**/*.ts" });
+    assert.match(res.content, /kept\/in\.ts/);
+    assert.doesNotMatch(res.content, /generated/);
+  });
+
+  test("without ripgrep, grep and glob fall back to grep and a directory walk", async () => {
+    await run(writeFile, { path: "fallback/a.txt", content: "needle here\n" });
+    await withoutRipgrep(async () => {
+      if (existsSync("/usr/bin/rg")) return; // rg installed system-wide: nothing to fall back from
+      assert.equal(fastTools().rg, undefined);
+      assert.match((await run(grep, { pattern: "needle", path: "fallback" })).content, /fallback\/a\.txt:1:needle here/);
+      assert.match((await run(glob, { pattern: "fallback/*.txt" })).content, /fallback\/a\.txt/);
+    });
+  });
+
+  test("the system prompt only suggests tools that are installed", async () => {
+    assert.match(buildSystemPrompt("/x", { fastTools: { rg: "/usr/bin/rg", fd: "/usr/bin/fdfind" } }), /rg \(ripgrep\) instead of grep -r, fdfind instead of find/);
+    assert.doesNotMatch(buildSystemPrompt("/x", { fastTools: {} }), /Faster tools/);
   });
 });
 

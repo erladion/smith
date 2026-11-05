@@ -4,6 +4,7 @@ import path from "node:path";
 import { z } from "zod";
 import { globToRegExp } from "../glob.js";
 import { resolveInRoot } from "../paths.js";
+import { fastTools } from "../toolchain.js";
 import { defineTool, type ToolResult, truncate } from "../tool.js";
 
 const MAX_OUTPUT_CHARS = 15_000;
@@ -32,8 +33,10 @@ export const grep = defineTool({
     [`/${pattern}/`, p && `in ${p}`, glob && `(${glob})`].filter(Boolean).join(" "),
   async run(input, ctx) {
     const target = input.path ? path.relative(ctx.cwd, await resolveInRoot(ctx.cwd, input.path)) || "." : ".";
-    const rg = await runSearch("rg", ripgrepArgs(input, target), ctx.cwd, ctx.signal);
-    const result = rg.missing ? await runSearch("grep", grepArgs(input, target), ctx.cwd, ctx.signal) : rg;
+    // ripgrep when installed (much faster, respects .gitignore), else grep.
+    const { rg } = fastTools();
+    let result = rg ? await runSearch(rg, ripgrepArgs(input, target), ctx.cwd, ctx.signal) : undefined;
+    if (!result || result.missing) result = await runSearch("grep", grepArgs(input, target), ctx.cwd, ctx.signal);
 
     if (result.missing) return { content: "Neither rg nor grep is installed.", isError: true };
     // Both tools exit 1 for "no matches" and 2 for real errors.
@@ -50,7 +53,7 @@ export const glob = defineTool({
   description:
     'Find files by name with a glob pattern such as "**/*.ts" or "src/**/test_*.py". ' +
     `Returns up to ${MAX_GLOB_RESULTS} paths, most recently modified first. ` +
-    "Skips .git, node_modules and common build directories.",
+    "Skips .git, node_modules, common build directories and (when ripgrep is installed) anything in .gitignore.",
   schema: z.object({
     pattern: z.string().min(1).describe("Glob pattern, relative to path"),
     path: z.string().optional().describe("Directory to search from, relative to the working directory (default: .)"),
@@ -65,7 +68,9 @@ export const glob = defineTool({
     const regex = globToRegExp(pattern);
     const matches: { file: string; mtime: number }[] = [];
 
-    for await (const { rel, abs } of walk(base, ctx.signal)) {
+    const { rg } = fastTools();
+    const files = rg ? ripgrepFiles(rg, base, ctx.signal) : walk(base, ctx.signal);
+    for await (const { rel, abs } of files) {
       if (!regex.test(rel)) continue;
       const stat = await fs.stat(abs).catch(() => null);
       if (!stat?.isFile()) continue;
@@ -103,6 +108,34 @@ async function* walk(base: string, signal: AbortSignal): AsyncGenerator<{ rel: s
       }
       yield { rel, abs: path.join(base, rel) };
     }
+  }
+}
+
+const MAX_LISTING_CHARS = 32_000_000;
+
+/**
+ * Lists files under `base` with `rg --files`: much faster than walking the
+ * tree in JavaScript on big repositories, and it skips what .gitignore
+ * ignores. Hidden files are included, as in the built-in walker.
+ */
+async function* ripgrepFiles(rg: string, base: string, signal: AbortSignal): AsyncGenerator<{ rel: string; abs: string }> {
+  const args = ["--files", "--hidden", "--color", "never"];
+  for (const dir of SKIP_DIRS) args.push("--glob", `!${dir}`);
+  const child = spawn(rg, args, { cwd: base, signal, stdio: ["ignore", "pipe", "ignore"] });
+  child.on("error", () => {}); // Aborted or missing; the stream simply ends.
+  let pending = "";
+  let read = 0;
+  try {
+    for await (const chunk of child.stdout) {
+      read += chunk.length;
+      const lines = (pending + chunk.toString("utf8")).split("\n");
+      pending = lines.pop() ?? "";
+      for (const rel of lines) if (rel) yield { rel, abs: path.join(base, rel) };
+      if (read > MAX_LISTING_CHARS) break;
+    }
+    if (pending) yield { rel: pending, abs: path.join(base, pending) };
+  } finally {
+    child.kill();
   }
 }
 

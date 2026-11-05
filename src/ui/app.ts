@@ -112,6 +112,8 @@ export class TuiApp {
   private busy = false;
   private abort: AbortController | null = null;
   private context: { tokens: number; limit?: number } | null = null;
+  /** Tools running right now (several when read-only tools run in parallel), by call id. */
+  private readonly running = new Map<string, string>();
 
   /** Everything printed so far, to reprint at a new width after a resize. */
   private readonly transcript: Entry[] = [];
@@ -275,8 +277,15 @@ export class TuiApp {
       lines.push([], ...this.approvalBox(this.approval, width));
     } else if (this.picker) {
       lines.push([], ...box(this.picker.picker.lines(), "cyan", width));
-    } else if (!this.busy) {
-      const prompt = prefixed([{ text: "› ", style: { color: "cyan" } }], [{ text: "  " }], this.editor.render("Ask for something, or /help"), width - 4);
+    } else if (!this.busy || this.agentRunning) {
+      const queued = this.agent.queuedMessages;
+      if (queued.length > 0) {
+        lines.push([]);
+        for (const text of queued) lines.push(...prefixed([{ text: "› ", style: DIM }], [{ text: "  " }], [{ text, style: DIM }], width));
+        lines.push([{ text: "  queued: the agent gets this at its next step", style: { ...DIM, italic: true } }]);
+      }
+      const placeholder = this.busy ? "Type to add to what the agent is doing (enter queues it)" : "Ask for something, or /help";
+      const prompt = prefixed([{ text: "› ", style: { color: "cyan" } }], [{ text: "  " }], this.editor.render(placeholder), width - 4);
       lines.push([], ...box(prompt, "gray", width, true));
     }
     lines.push(this.statusLine(width));
@@ -321,7 +330,7 @@ export class TuiApp {
     }
     const { sandbox } = this.opts;
     if (sandbox.active) parts.push(`sandbox, net ${sandbox.network ? "on" : "off"}`);
-    if (this.busy) parts.push("esc to interrupt");
+    if (this.busy) parts.push(this.agentRunning ? "esc to interrupt · enter queues" : "esc to interrupt");
     const line: Line = sandbox.active ? [] : [{ text: "unsandboxed · ", style: { color: "red" } }];
     line.push({ text: parts.filter(Boolean).join(" · "), style: DIM });
     return truncate(line, width);
@@ -343,18 +352,25 @@ export class TuiApp {
         this.flushLive();
         this.activity = `Preparing ${event.name}…`;
         break;
+      case "user_message":
+        this.flushLive();
+        this.print({ kind: "user", text: event.text });
+        break;
       case "tool_start":
-        this.activity = `${event.name} ${event.summary}`;
+        this.running.set(event.id, `${event.name} ${event.summary}`);
+        this.activity = this.runningLabel();
         break;
       case "tool_end":
-        this.activity = "Thinking…";
+        this.running.delete(event.id);
+        this.activity = this.runningLabel();
         this.print({ kind: "tool", name: event.name, summary: event.summary, output: event.output, isError: event.isError, diff: event.diff });
         break;
       case "context":
         this.context = { tokens: event.tokens, limit: event.limit };
         break;
       case "activity":
-        this.activity = event.text;
+        // Progress from inside a tool (a sub-agent); say so when several run at once.
+        this.activity = this.running.size > 1 ? `${this.running.size} in parallel · ${event.text}` : event.text;
         break;
       case "notice":
         this.flushLive();
@@ -365,6 +381,31 @@ export class TuiApp {
         break;
     }
     this.requestRender();
+  }
+
+  /** The spinner text for the tools in flight: one tool, or how many run in parallel. */
+  private runningLabel(): string {
+    const labels = [...this.running.values()];
+    if (labels.length === 0) return "Thinking…";
+    if (labels.length === 1) return labels[0]!;
+    return `${labels.length} tools in parallel: ${labels.map((l) => l.split(" ")[0]).join(", ")}`;
+  }
+
+  /** Whether an agent turn is running (as opposed to e.g. switching model), so typing can be queued. */
+  private get agentRunning(): boolean {
+    return this.busy && this.abort !== null;
+  }
+
+  /** A message typed while the agent works: queued for its next step. */
+  private queueMessage(value: string): void {
+    const text = value.trim();
+    if (!text) return;
+    if (text.startsWith("/")) {
+      this.editor.setValue(value);
+      this.print({ kind: "notice", level: "warn", text: "Commands work once the agent is done. Your command is still in the input box." });
+      return;
+    }
+    this.agent.queue(text);
   }
 
   /**
@@ -426,6 +467,7 @@ export class TuiApp {
 
     if (this.busy) {
       if (key.name === "escape") this.abort?.abort();
+      else if (this.agentRunning && this.editor.handle(key) === "submit") this.queueMessage(this.editor.commit());
       return;
     }
 
@@ -495,7 +537,15 @@ export class TuiApp {
       this.flushLive();
       this.abort = null;
       this.activity = null;
+      this.running.clear();
       this.busy = false;
+      // Messages the agent never got (interrupted, error, step limit) go back into the input.
+      const undelivered = this.agent.takeQueued();
+      if (undelivered.length > 0) {
+        const typing = this.editor.value.trim();
+        this.editor.setValue([...undelivered, ...(typing ? [typing] : [])].join("\n\n"));
+        this.print({ kind: "notice", level: "warn", text: "Your queued message wasn't delivered, so it's back in the input box." });
+      }
       this.requestRender();
     }
   }

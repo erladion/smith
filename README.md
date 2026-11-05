@@ -8,7 +8,7 @@ A small agentic coding harness with a terminal UI. It talks to any OpenAI-compat
 - Node.js 22 or newer. On RHEL 9: `sudo dnf module install nodejs:22`
 - bash and grep (always present)
 - Recommended: `bubblewrap` for the shell sandbox (`sudo dnf install bubblewrap`, in RHEL 9 BaseOS)
-- Optional: `ripgrep` for faster search (EPEL); falls back to grep
+- Optional: `ripgrep` (EPEL) and `fd-find` for faster search; the agent falls back to grep and its own file walker
 
 The only npm runtime dependencies are `openai` and `zod`, neither of which has dependencies of its own. The terminal UI is written from scratch.
 
@@ -35,14 +35,15 @@ git tag v0.2.0 && git push origin v0.2.0
 
 The workflow typechecks, runs the tests (with bubblewrap, so the sandbox tests run too),
 builds the binary, checks that it starts on RHEL 9 (Red Hat's UBI 9 image), and publishes a
-GitHub release with `agent-<version>-linux-x64.gz` and `SHA256SUMS`. A tag that doesn't match
+GitHub release with `agent-<version>-linux-x64.tar.gz` (the binary and this README) and
+`SHA256SUMS`. A tag that doesn't match
 `package.json` fails the run. Running the workflow by hand from the Actions tab builds and tests
 without releasing, and keeps the binary as a workflow artifact. To install a release:
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
-gunzip -c agent-*-linux-x64.gz > agent && chmod +x agent
-sudo mv agent /usr/local/bin/
+tar -xzf agent-*-linux-x64.tar.gz
+sudo install agent-*-linux-x64/agent /usr/local/bin/
 sudo dnf install libatomic bubblewrap
 ```
 - bubblewrap is still needed on the target for the shell sandbox.
@@ -96,6 +97,10 @@ Servers you use regularly go in `~/.config/agent/config.json`:
 | `model` | model to use when you haven't picked one on this endpoint before |
 | `contextSize` | context window, for servers that don't report it (e.g. Ollama) |
 
+At the top level, next to `endpoints`, `"maxSteps": 120` sets how many model calls one message
+may use before the agent stops and asks you (default 50; `--max-steps` overrides it for one run).
+Raise it for long autonomous tasks; when it stops, sending "continue" gives it a fresh budget.
+
 `--endpoints` lists them, `-e <name>` starts on one, and `/endpoint` switches mid-conversation.
 Without `-e`, the agent starts on the resumed session's endpoint, else the one used last, else
 `default`. `--base-url` (or `AGENT_BASE_URL`) bypasses the config for a one-off server, and only
@@ -117,7 +122,11 @@ configured endpoint they weren't set for. The file is only read, never written.
 | `/new` | start a new session; `/clear` does the same, and the old one stays resumable |
 | `/help`, `/exit` | |
 
-Enter sends, ↑/↓ recall earlier input, Esc interrupts the agent and Ctrl+C quits. For a new line
+Enter sends, ↑/↓ recall earlier input, Esc interrupts the agent and Ctrl+C quits. You can keep
+typing while the agent works: Enter queues the message, and the agent gets it at its next step
+(between tool calls, or right after a reply), so you can steer it without stopping it. If the
+turn ends before it's delivered (interrupted, an error, the step limit), it goes back into the
+input box. For a new line
 in your message use Shift+Enter, `\` then Enter, or Ctrl+J; pastes may span several lines.
 
 Shift+Enter needs a terminal that reports it separately from Enter. The agent asks for the
@@ -171,6 +180,22 @@ the same way. Skills are found in `.agents/skills/` and `.claude/skills/` at the
 root, then `~/.config/agent/skills/` and `~/.claude/skills/`; a project skill overrides a
 personal one with the same name. Skill folders are visible read-only inside the sandbox, so
 their scripts can run.
+
+## How the agent works through a task
+
+- **Parallel tools.** When the model asks for several read-only tools in one response (reads,
+  searches, sub-agents), they run at the same time. Tools that need your approval run one at a
+  time. The agent sends `parallel_tool_calls: true`, which llama.cpp needs before a model may
+  ask for more than one tool per response.
+- **Sub-agents.** The `task` tool hands an investigation ("find where X is configured and how
+  it's used") to a sub-agent with a fresh context and read-only tools (read, grep, glob, skill).
+  Only its short report comes back, so the file reading never fills the main conversation,
+  which matters most with small context windows. Set `"subagents": false` in the config file to
+  turn it off, e.g. for a model that overuses it.
+- **Fast tools.** `rg` (ripgrep), `fd` and `jq` are detected at startup. The `grep` tool uses
+  ripgrep when it's there (else grep), `glob` lists files with `rg --files` (faster on big
+  repositories, and skips what `.gitignore` ignores), and the system prompt tells the model which
+  of them it can use in shell commands. On RHEL 9, ripgrep comes from EPEL.
 
 ## Changes and undo
 

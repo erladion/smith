@@ -77,12 +77,13 @@ jobs:
 
       - name: Package
         run: |
-          # A single gzipped file: unpacking needs only gunzip, which even
-          # minimal systems have (unlike xz, and not always tar).
+          # tar.gz rather than tar.xz: RHEL 9 doesn't install xz by default.
           name="agent-${{ steps.version.outputs.version }}-${{ matrix.target }}"
-          mkdir -p dist
-          gzip -9 -c build/agent > "dist/$name.gz"
-          (cd dist && sha256sum "$name.gz" > "$name.gz.sha256")
+          mkdir -p "dist/$name"
+          cp build/agent README.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -r "dist/${name:?}"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
           ls -l dist
 
       - uses: actions/upload-artifact@v4
@@ -113,12 +114,12 @@ jobs:
           cat > notes.md <<'EOF'
           ## Install
 
-          Download the `.gz` file for your machine and `SHA256SUMS`, then:
+          Download the `.tar.gz` for your machine and `SHA256SUMS`, then:
 
           ```sh
           sha256sum --check --ignore-missing SHA256SUMS
-          gunzip -c agent-*-linux-x64.gz > agent && chmod +x agent
-          sudo mv agent /usr/local/bin/
+          tar -xzf agent-*-linux-x64.tar.gz
+          sudo install agent-*-linux-x64/agent /usr/local/bin/
           ```
 
           The binary contains its own Node.js. On RHEL 9 it needs two system packages:

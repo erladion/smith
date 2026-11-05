@@ -10,6 +10,8 @@ import { SUMMARY_PREFIX } from "../src/core/context.js";
 import type { AgentEvent } from "../src/core/events.js";
 import type { HistoryChange, Message } from "../src/core/history.js";
 import { defaultTools } from "../src/core/tools/index.js";
+import { defineTool } from "../src/core/tool.js";
+import { z } from "zod";
 import { type FakeServer, startFakeServer, toolCallDeltas } from "./fake-server.js";
 
 let fake: FakeServer;
@@ -188,6 +190,127 @@ test("recovers from a llama.cpp context-overflow error by compacting and retryin
   // The server's n_ctx was learned from the error.
   const ctx = events.findLast((e) => e.type === "context");
   assert.equal(ctx?.type === "context" && ctx.limit, 8192);
+});
+
+test("stops after maxSteps model calls and can continue with another message", async () => {
+  // A model that keeps calling tools and never answers.
+  const glob = (id: string) => ({ deltas: toolCallDeltas("glob", { pattern: "*.none" }, id), finish: "tool_calls" });
+  fake.script = [glob("a"), glob("b"), glob("c")];
+  const { agent, events } = makeAgent("allow", { maxSteps: 2 });
+  await agent.send("loop", new AbortController().signal);
+
+  assert.equal(fake.requests.length, 2);
+  assert.deepEqual(events.at(-1), { type: "done", reason: "max_steps" });
+  assert.ok(events.some((e) => e.type === "notice" && /Stopped after 2 model calls[\s\S]*maxSteps/.test(e.text)));
+
+  fake.script = [{ deltas: [{ content: "finished" }], finish: "stop" }];
+  await agent.send("continue", new AbortController().signal);
+  assert.deepEqual(events.at(-1), { type: "done", reason: "stop" });
+});
+
+/** A read-only tool that takes `ms` to run and records when it ran. */
+const timeline: { name: string; start: number; end: number }[] = [];
+const slowTool = defineTool({
+  name: "slow",
+  description: "test",
+  schema: z.object({ label: z.string() }),
+  readOnly: true,
+  summarize: ({ label }) => label,
+  async run({ label }) {
+    const start = Date.now();
+    await new Promise((r) => setTimeout(r, 200));
+    timeline.push({ name: label, start, end: Date.now() });
+    return { content: `done ${label}` };
+  },
+});
+
+const twoCalls = (a: string, b: string) => [
+  { tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "slow", arguments: JSON.stringify({ label: a }) } }] },
+  { tool_calls: [{ index: 1, id: "c2", type: "function", function: { name: "slow", arguments: JSON.stringify({ label: b }) } }] },
+];
+
+test("read-only tool calls in one response run in parallel, results in order", async () => {
+  timeline.length = 0;
+  fake.script = [
+    { deltas: twoCalls("first", "second"), finish: "tool_calls" },
+    { deltas: [{ content: "ok" }], finish: "stop" },
+  ];
+  const { agent } = makeAgent("allow", { tools: [...defaultTools, slowTool] });
+  await agent.send("go", new AbortController().signal);
+
+  const [a, b] = timeline;
+  assert.ok(a && b && a.start < b.end && b.start < a.end, "the two runs overlapped");
+  const tools = fake.requests[1]!.messages.filter((m: { role: string }) => m.role === "tool");
+  assert.deepEqual(tools.map((m: { content: string }) => m.content), ["done first", "done second"]);
+  assert.equal(fake.requests[0]!.parallel_tool_calls, true);
+});
+
+test("a message typed during a tool call is delivered before the next model call", async () => {
+  fake.script = [
+    { deltas: toolCallDeltas("glob", { pattern: "*.none" }), finish: "tool_calls" },
+    { deltas: [{ content: "adjusted" }], finish: "stop" },
+  ];
+  let agentRef: Agent | undefined;
+  const { agent, events } = makeAgent("allow", {
+    onEvent: (e) => {
+      events.push(e);
+      if (e.type === "tool_start") agentRef?.queue("actually, only look in src/");
+    },
+  });
+  agentRef = agent;
+  await agent.send("find things", new AbortController().signal);
+
+  const sent = fake.requests[1]!.messages.slice(-2);
+  assert.equal(sent[0].role, "tool");
+  assert.deepEqual(sent[1], { role: "user", content: "actually, only look in src/" });
+  assert.ok(events.some((e) => e.type === "user_message" && e.text === "actually, only look in src/"));
+  assert.equal(agent.queuedMessages.length, 0);
+});
+
+test("a message typed during the final answer keeps the turn going", async () => {
+  fake.script = [
+    { deltas: [{ content: "Here is my answer." }], finish: "stop" },
+    { deltas: [{ content: "Updated answer." }], finish: "stop" },
+  ];
+  let queued = false;
+  let agentRef: Agent | undefined;
+  const { agent, events } = makeAgent("allow", {
+    onEvent: (e) => {
+      events.push(e);
+      if (e.type === "delta" && !queued) {
+        queued = true;
+        agentRef?.queue("also mention the tests");
+      }
+    },
+  });
+  agentRef = agent;
+  await agent.send("answer", new AbortController().signal);
+  assert.equal(fake.requests.length, 2);
+  assert.deepEqual(fake.requests[1]!.messages.at(-1), { role: "user", content: "also mention the tests" });
+  assert.deepEqual(events.at(-1), { type: "done", reason: "stop" });
+});
+
+test("a sub-agent investigates in its own context and only its report comes back", async () => {
+  fake.script = [
+    { deltas: toolCallDeltas("task", { description: "find config", prompt: "Where is the port configured?" }), finish: "tool_calls" },
+    // The sub-agent's own request: searches, then reports.
+    { deltas: toolCallDeltas("grep", { pattern: "port" }, "s1"), finish: "tool_calls" },
+    { deltas: [{ content: "The port is set in config/server.ts:12." }], finish: "stop" },
+    { deltas: [{ content: "It's in config/server.ts." }], finish: "stop" },
+  ];
+  const { agent, events } = makeAgent("allow", { subagentPrompt: "SUBAGENT PROMPT" });
+  await agent.send("where is the port set?", new AbortController().signal);
+
+  const child = fake.requests[1]!;
+  assert.equal(child.messages[0].content, "SUBAGENT PROMPT");
+  assert.deepEqual(child.messages.slice(1), [{ role: "user", content: "Where is the port configured?" }]);
+  const childTools = child.tools.map((t: { function: { name: string } }) => t.function.name).sort();
+  assert.deepEqual(childTools, ["glob", "grep", "read_file"], "read-only tools only, no nested task tool");
+
+  const parentAfter = fake.requests[3]!.messages;
+  assert.equal(parentAfter.at(-1).content, "The port is set in config/server.ts:12.");
+  assert.ok(!JSON.stringify(parentAfter).includes("s1"), "the sub-agent's own tool calls stay out of the main conversation");
+  assert.ok(events.some((e) => e.type === "activity" && /find config › grep/.test(e.text)));
 });
 
 test("loading a saved conversation replaces history without recording it", async () => {

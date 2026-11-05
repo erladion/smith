@@ -8,12 +8,13 @@ import type { AgentEvent } from "./core/events.js";
 import type { Message } from "./core/history.js";
 import { loadPreferences, type Preferences, savePreferences } from "./core/preferences.js";
 import { findRepoRoot, loadInstructions } from "./core/instructions.js";
-import { buildSystemPrompt } from "./core/prompt.js";
+import { buildSubagentPrompt, buildSystemPrompt } from "./core/prompt.js";
 import { isReasoningLevel, REASONING_LEVELS, type ReasoningLevel } from "./core/reasoning.js";
 import { Sandbox, type SandboxMode } from "./core/sandbox.js";
 import { Server } from "./core/server.js";
 import { listSessions, Session } from "./core/session.js";
 import { loadSkills, skillRoots } from "./core/skills.js";
+import { fastTools } from "./core/toolchain.js";
 import { defaultTools } from "./core/tools/index.js";
 import { createSkillTool } from "./core/tools/skill.js";
 import { type AgentHooks, TuiApp } from "./ui/app.js";
@@ -32,6 +33,7 @@ Server:
   --reasoning <level>    ${REASONING_LEVELS.join(" | ")} (default: last used, else "default")
   --context-size <n>     Context window in tokens, if the server doesn't report it
   --temperature <n>      Sampling temperature (default: the server's)
+  --max-steps <n>        Model calls allowed per message (default: maxSteps in the config file, else 50)
 
 Sandbox (shell commands run in bubblewrap):
   --sandbox <mode>       auto | on | off (default auto: use bwrap if it works, else warn)
@@ -62,6 +64,7 @@ async function main(): Promise<void> {
       reasoning: { type: "string" },
       "context-size": { type: "string" },
       temperature: { type: "string" },
+      "max-steps": { type: "string" },
       sandbox: { type: "string" },
       network: { type: "boolean" },
       continue: { type: "boolean", short: "c" },
@@ -107,6 +110,8 @@ async function main(): Promise<void> {
   const server = chooseServer(values, config, prefs, resumed?.session.endpoint);
 
   const temperature = parseNumber(values.temperature, "--temperature");
+  const maxSteps = parseNumber(values["max-steps"], "--max-steps") ?? config.maxSteps ?? 50;
+  if (!Number.isInteger(maxSteps) || maxSteps < 1) throw new Error("--max-steps must be a whole number of at least 1");
   const reasoning = resolveReasoning(values.reasoning, prefs.reasoning);
   const model =
     values.model ??
@@ -135,11 +140,13 @@ async function main(): Promise<void> {
       reasoning,
       cwd,
       temperature,
+      maxSteps,
       contextSize,
       sandbox,
       history,
       tools,
-      systemPrompt: buildSystemPrompt(cwd, { instructions, skills }),
+      systemPrompt: buildSystemPrompt(cwd, { instructions, skills, fastTools: fastTools() }),
+      subagentPrompt: config.subagents ? buildSubagentPrompt(cwd, { instructions, skills }) : undefined,
       onHistory: (change) => session.record(change),
       ...hooks,
     });

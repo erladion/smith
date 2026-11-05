@@ -9,6 +9,8 @@ export type NoticeLevel = "info" | "warn" | "error";
 export type DoneReason = "stop" | "interrupted" | "length" | "max_steps";
 
 export type AgentEvent =
+  /** Messages you typed while the agent worked, now handed to the model. */
+  | { type: "user_message"; text: string }
   /** A streamed chunk of assistant text or reasoning. */
   | { type: "delta"; kind: BlockKind; text: string }
   /** The model finished streaming one response; flush any live text. */
