@@ -143,6 +143,16 @@ describe("line editor", () => {
     assert.equal(type(e, "\r"), true, "plain enter still submits");
   });
 
+  test("the cursor stays visible at the end of the input", () => {
+    const e = new LineEditor();
+    type(e, "abc");
+    assert.deepEqual(plain(wrap(e.render("placeholder"), 10)), ["abc "]);
+    // When the text fills the line exactly, the cursor moves to the next one rather than vanishing.
+    const full = wrap(e.render("placeholder"), 3);
+    assert.deepEqual(plain(full), ["abc", " "]);
+    assert.ok(full[1]!.some((s) => s.style?.inverse));
+  });
+
   test("enter submits and history recalls earlier lines", () => {
     const e = new LineEditor();
     assert.equal(type(e, "first\r"), true);

@@ -1,7 +1,15 @@
 import os from "node:os";
+import type { InstructionFile } from "./instructions.js";
+import type { Skill } from "./skills.js";
 
-export function buildSystemPrompt(cwd: string): string {
-  return `You are a coding agent working in the user's terminal. You help with software tasks in the working directory by reading files, editing files, and running shell commands.
+export interface PromptExtras {
+  /** AGENTS.md files, most general first. */
+  instructions?: InstructionFile[];
+  skills?: Skill[];
+}
+
+export function buildSystemPrompt(cwd: string, { instructions = [], skills = [] }: PromptExtras = {}): string {
+  let prompt = `You are a coding agent working in the user's terminal. You help with software tasks in the working directory by reading files, editing files, and running shell commands.
 
 Environment:
 - Working directory: ${cwd}
@@ -15,4 +23,24 @@ How to work:
 - After making a change, check it when you can, for example by running the build or tests.
 - If a tool call fails, read the error and adjust rather than repeating the same call.
 - When the task is done, reply with a short summary of what you did. The terminal renders basic Markdown (bold, italics, inline code, lists, headings, fenced code blocks) but not tables or images.`;
+
+  if (instructions.length > 0) {
+    prompt += `
+
+# Instructions from the user and the project
+
+These files contain instructions for working here. Follow them. Where they disagree, a file listed later (closer to the working directory) takes precedence.`;
+    for (const file of instructions) prompt += `\n\n## ${file.path}\n\n${file.content}`;
+  }
+
+  if (skills.length > 0) {
+    prompt += `
+
+# Skills
+
+Skills are packaged instructions for particular kinds of tasks. When a task matches a skill's description, load the skill with the skill tool before starting, and follow it.
+
+${skills.map((s) => `- ${s.name}: ${s.description.replace(/\s+/g, " ")}`).join("\n")}`;
+  }
+  return prompt;
 }

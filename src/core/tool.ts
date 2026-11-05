@@ -1,5 +1,6 @@
 import type OpenAI from "openai";
 import { z } from "zod";
+import type { DiffLine } from "./diff.js";
 import type { Sandbox } from "./sandbox.js";
 
 export interface ToolContext {
@@ -9,11 +10,17 @@ export interface ToolContext {
   signal: AbortSignal;
   /** Where shell commands run. Defaults to no sandbox. */
   sandbox?: Sandbox;
+  /** File tools call these around each write, so the turn can be undone. */
+  beforeWrite?: (file: string) => Promise<void>;
+  afterWrite?: (file: string, content: string) => void;
 }
 
 export interface ToolResult {
+  /** What the model sees. */
   content: string;
   isError?: boolean;
+  /** For file changes: the diff, shown to the user instead of `content`. */
+  diff?: DiffLine[];
 }
 
 export interface ToolDef<S extends z.ZodType = z.ZodType> {
@@ -26,6 +33,11 @@ export interface ToolDef<S extends z.ZodType = z.ZodType> {
   sandboxed?: boolean;
   /** One-line description of a call, shown in the transcript and approval prompt. */
   summarize: (input: z.output<S>) => string;
+  /**
+   * The change the call would make, shown in the approval prompt. Throwing
+   * means the call would fail; the error goes to the model without asking.
+   */
+  preview?: (input: z.output<S>, ctx: ToolContext) => Promise<DiffLine[]>;
   run: (input: z.output<S>, ctx: ToolContext) => Promise<ToolResult>;
 }
 

@@ -87,6 +87,8 @@ configured endpoint they weren't set for. The file is only read, never written.
 | `/model [name]` | pick from the models the server lists, or switch by name |
 | `/reasoning [level]` | `default`, `off`, `low`, `medium`, `high` |
 | `/network on\|off` | allow or block network access for sandboxed commands |
+| `/undo` | undo the last turn: restore the files it changed and edit your message again |
+| `/skills` | list the available skills |
 | `/compact` | summarize the conversation now |
 | `/clear` | start over |
 | `/help`, `/exit` | |
@@ -121,6 +123,43 @@ for servers that reject unknown fields.
 Reasoning is shown dimmed. It is taken from `reasoning_content`/`reasoning` when the server
 separates it, or from inline `<think>...</think>` tags when it doesn't.
 
+## Project instructions and skills
+
+**Instructions.** `AGENTS.md` files are added to the system prompt, most general first:
+`~/.config/agent/AGENTS.md` (your own rules for every project), then one in each folder from the
+repository root down to the working directory. A folder without `AGENTS.md` can use `CLAUDE.md`
+instead. Put the build and test commands and the project's conventions here; small local
+models benefit the most.
+
+**Skills** are folders containing a `SKILL.md`, in the same format Claude and OpenCode use:
+
+```markdown
+---
+name: cpp-style
+description: House C++ style. Use when writing or reviewing C++.
+---
+Use 4-space indentation...
+```
+
+Only each skill's name and description go into the prompt. The model loads the full
+instructions with the `skill` tool when a task matches, and can read the skill's other files
+the same way. Skills are found in `.agents/skills/` and `.claude/skills/` at the repository
+root, then `~/.config/agent/skills/` and `~/.claude/skills/`; a project skill overrides a
+personal one with the same name. Skill folders are visible read-only inside the sandbox, so
+their scripts can run.
+
+## Changes and undo
+
+Approving `write_file` or `edit_file` shows the diff of what will change, and the transcript
+keeps it afterwards. An edit that can't apply (text not found, not unique) goes back to the
+model without asking you.
+
+`/undo` puts back the files the last turn changed with `write_file` and `edit_file`, removes the
+turn from the conversation, and puts your message back in the input box to change and resend.
+Repeat it to go further back (up to 20 turns). Two limits: changes made by `bash` commands
+can't be undone (you're told when a turn ran any), and a file you've changed since is left
+alone. Undo history lives in memory, so it doesn't survive a restart or a compaction.
+
 ## Sessions
 
 Every conversation is saved as an append-only JSONL log in `~/.local/share/agent/sessions/`.
@@ -148,7 +187,11 @@ src/core/reasoning.ts    reasoning levels -> request fields
 src/core/think.ts        streaming <think> tag parser
 src/core/sandbox.ts      bubblewrap sandbox for shell commands
 src/core/glob.ts         glob matching for the glob tool
-src/core/tools/          read_file, grep, glob, write_file, edit_file, bash
+src/core/tools/          read_file, grep, glob, write_file, edit_file, bash, skill
+src/core/instructions.ts AGENTS.md loading
+src/core/skills.ts       skill discovery and SKILL.md headers
+src/core/diff.ts         line diffs (Myers) for approvals and the transcript
+src/core/undo.ts         per-turn file checkpoints for /undo
 src/ui/                  terminal UI: renderer, Markdown, keys, input editor, pickers
 src/cli.tsx              flags, model selection, TUI or headless mode
 test/                    unit tests, and loop tests against a fake streaming server

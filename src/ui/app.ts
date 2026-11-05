@@ -8,7 +8,7 @@ import type { Sandbox } from "../core/sandbox.js";
 import { Server } from "../core/server.js";
 import type { ToolDef } from "../core/tool.js";
 import { LineEditor } from "./editor.js";
-import { box, DIM, type Entry, entryLines, REASONING } from "./entries.js";
+import { box, DIM, diffView, type Entry, entryLines, REASONING } from "./entries.js";
 import { type Key, KeyReader } from "./keys.js";
 import { markdownLines, safeSplit } from "./markdown.js";
 import { Picker } from "./picker.js";
@@ -45,6 +45,10 @@ export interface TuiOptions {
   /** Conversation restored from a saved session, shown before the prompt. */
   resumed: Message[];
   tools: ToolDef[];
+  /** Instruction files in use, for the banner. */
+  instructions: string[];
+  /** Skills available, by name and description, for the banner and /skills. */
+  skills: { name: string; description: string }[];
   /** Remembers the user's endpoint, model and reasoning choices for next time. */
   savePreferences: (update: PreferenceUpdate) => void;
 }
@@ -58,6 +62,8 @@ const HELP = `Commands:
   /endpoint [name]    pick a configured endpoint, or switch to one by name
   /model [name]       pick a model from the server, or switch to one by name
   /reasoning [level]  pick how much the model thinks: ${REASONING_LEVELS.join(", ")}
+  /undo               undo the last turn: restore files it changed and edit your message again
+  /skills             list the available skills
   /network on|off     allow or block network access for sandboxed commands
   /compact            summarize the conversation now to free context
   /clear              start the conversation over
@@ -125,6 +131,8 @@ export class TuiApp {
       session: sessionId,
       resumed: resumed.length > 0,
       sandbox: { active: sandbox.active, description: sandbox.describe() },
+      instructions: this.opts.instructions,
+      skills: this.opts.skills.map((s) => s.name),
     });
     for (const text of this.opts.warnings) this.print({ kind: "notice", level: "warn", text });
     for (const entry of historyToEntries(resumed, tools)) this.print(entry);
@@ -242,6 +250,11 @@ export class TuiApp {
     const summary = wrap([{ text: req.summary }], width - 4);
     content.push(...summary.slice(0, 12));
     if (summary.length > 12) content.push([{ text: `… ${summary.length - 12} more lines`, style: DIM }]);
+    if (req.preview) {
+      // Leave room for the rest of the screen, but show as much of the change as fits.
+      const room = Math.max(6, (this.term.output.rows || 24) - content.length - 10);
+      content.push([], ...diffView(req.preview, width - 4, room), []);
+    }
     if (req.sandbox) {
       content.push([{ text: `${req.sandbox.active ? "✓" : "⚠"} ${req.sandbox.description}`, style: { color: req.sandbox.active ? "green" : "red" } }]);
     }
@@ -297,7 +310,7 @@ export class TuiApp {
         break;
       case "tool_end":
         this.activity = "Thinking…";
-        this.print({ kind: "tool", name: event.name, summary: event.summary, output: event.output, isError: event.isError });
+        this.print({ kind: "tool", name: event.name, summary: event.summary, output: event.output, isError: event.isError, diff: event.diff });
         break;
       case "context":
         this.context = { tokens: event.tokens, limit: event.limit };
@@ -403,6 +416,10 @@ export class TuiApp {
           return this.print({ kind: "notice", level: "info", text: "Conversation cleared." });
         case "/network":
           return this.setNetwork(arg);
+        case "/undo":
+          return this.undo();
+        case "/skills":
+          return this.listSkills();
         case "/compact":
           return this.runBusy("Compacting…", (signal) => this.agent.compactNow(signal));
         case "/endpoint":
@@ -457,6 +474,26 @@ export class TuiApp {
       this.busy = false;
       this.requestRender();
     }
+  }
+
+  private async undo(): Promise<void> {
+    const result = await this.agent.undo();
+    if (!result) return this.print({ kind: "notice", level: "info", text: "Nothing to undo." });
+    const rel = (f: string) => f.startsWith(this.opts.cwd + "/") ? f.slice(this.opts.cwd.length + 1) : f;
+    const lines = ["Undid the last turn and removed it from the conversation."];
+    if (result.restored.length) lines.push(`Restored: ${result.restored.map(rel).join(", ")}`);
+    if (result.skipped.length) lines.push(`Left alone because they changed afterwards: ${result.skipped.map(rel).join(", ")}`);
+    if (result.untracked.length) lines.push(`Not undone: anything changed by ${result.untracked.join(", ")} commands.`);
+    this.print({ kind: "notice", level: result.skipped.length || result.untracked.length ? "warn" : "info", text: lines.join("\n") });
+    this.editor.setValue(result.prompt);
+  }
+
+  private listSkills(): void {
+    const { skills } = this.opts;
+    if (skills.length === 0) {
+      return this.print({ kind: "notice", level: "info", text: "No skills found. Add folders with a SKILL.md to .agents/skills/ in the project or ~/.config/agent/skills/." });
+    }
+    this.print({ kind: "notice", level: "info", text: skills.map((s) => `${s.name}: ${s.description.replace(/\s+/g, " ")}`).join("\n") });
   }
 
   private setNetwork(arg: string): void {

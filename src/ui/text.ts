@@ -112,7 +112,8 @@ export function wrap(line: Line, width: number): Line[] {
       if (i > 0) newLine(false);
       for (const token of part.match(/ +|[^ ]+/g) ?? []) {
         const w = textWidth(token);
-        if (token.startsWith(" ")) {
+        // An inverse space is the input cursor: it's content, not a place to break.
+        if (token.startsWith(" ") && !span.style?.inverse) {
           if (afterSoftBreak && used === 0) continue;
           if (used + w <= width) add(token, span.style);
           else newLine(true);
@@ -139,6 +140,7 @@ function trimEnd(line: Line): Line {
   const out = line.map((s) => ({ ...s }));
   while (out.length > 0) {
     const last = out[out.length - 1]!;
+    if (last.style?.inverse) break;
     last.text = last.text.replace(/ +$/, "");
     if (last.text) break;
     out.pop();

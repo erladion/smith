@@ -83,6 +83,11 @@ export class LineEditor {
     ];
   }
 
+  /** Replaces the text, with the cursor at the end (e.g. a message put back by /undo). */
+  setValue(value: string): void {
+    this.set(value);
+  }
+
   private set(value: string): void {
     this.value = value;
     this.cursor = value.length;

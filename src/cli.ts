@@ -1,16 +1,21 @@
 #!/usr/bin/env node
+import os from "node:os";
+import path from "node:path";
 import { parseArgs } from "node:util";
 import { Agent } from "./core/agent.js";
 import { type Config, EXAMPLE_CONFIG, loadConfig } from "./core/config.js";
 import type { AgentEvent } from "./core/events.js";
 import type { Message } from "./core/history.js";
 import { loadPreferences, type Preferences, savePreferences } from "./core/preferences.js";
+import { findRepoRoot, loadInstructions } from "./core/instructions.js";
 import { buildSystemPrompt } from "./core/prompt.js";
 import { isReasoningLevel, REASONING_LEVELS, type ReasoningLevel } from "./core/reasoning.js";
 import { Sandbox, type SandboxMode } from "./core/sandbox.js";
 import { Server } from "./core/server.js";
 import { listSessions, Session } from "./core/session.js";
+import { loadSkills, skillRoots } from "./core/skills.js";
 import { defaultTools } from "./core/tools/index.js";
+import { createSkillTool } from "./core/tools/skill.js";
 import { type AgentHooks, TuiApp } from "./ui/app.js";
 import { describeError } from "./core/errors.js";
 
@@ -106,6 +111,12 @@ async function main(): Promise<void> {
   if (!["auto", "on", "off"].includes(sandboxMode)) throw new Error("--sandbox must be auto, on or off");
   const sandbox = Sandbox.create(sandboxMode as SandboxMode, values.network ?? false);
 
+  const instructions = loadInstructions(cwd);
+  const { skills, warnings: skillWarnings } = loadSkills(skillRoots(findRepoRoot(cwd) ?? cwd));
+  const tools = skills.length ? [...defaultTools, createSkillTool(skills)] : defaultTools;
+  sandbox.readOnlyPaths = skills.map((s) => s.dir);
+  const warnings = [...config.warnings, ...skillWarnings];
+
   const session = resumed?.session ?? Session.create(cwd, model, server.name);
   session.recordModel(model, server.name);
   const history = resumed?.messages ?? [];
@@ -119,14 +130,14 @@ async function main(): Promise<void> {
       contextSize,
       sandbox,
       history,
-      tools: defaultTools,
-      systemPrompt: buildSystemPrompt(cwd),
+      tools,
+      systemPrompt: buildSystemPrompt(cwd, { instructions, skills }),
       onHistory: (change) => session.record(change),
       ...hooks,
     });
 
   if (values.print !== undefined) {
-    for (const warning of config.warnings) process.stderr.write(`[warn] ${warning}\n`);
+    for (const warning of warnings) process.stderr.write(`[warn] ${warning}\n`);
     process.stderr.write(`[${server.label} · ${model} · ${sandbox.describe()}]\n`);
     await runHeadless(createAgent, values.print, values.yes ?? false, server.baseURL);
     process.stderr.write(`[session ${session.id}]\n`);
@@ -141,13 +152,15 @@ async function main(): Promise<void> {
     server,
     endpoints: config.endpoints,
     configFile: config.file,
-    warnings: config.warnings,
+    warnings,
     rememberedModel: (baseURL) => loadPreferences().models?.[baseURL],
     sandbox,
     cwd,
     sessionId: session.id,
     resumed: history,
-    tools: defaultTools,
+    tools,
+    instructions: instructions.map((f) => displayPath(f.path, cwd)),
+    skills,
     savePreferences: ({ server, model, reasoning }) => {
       if (model) session.recordModel(model, server.name);
       savePreferences({
@@ -158,6 +171,14 @@ async function main(): Promise<void> {
     },
   }).run();
   console.log(`Session ${session.id}. Resume with: agent --resume ${session.id}`);
+}
+
+/** A short path for display: relative to the project when nearby, else with ~ for the home folder. */
+function displayPath(file: string, cwd: string): string {
+  const rel = path.relative(cwd, file);
+  if (!rel.startsWith(`..${path.sep}..`)) return rel;
+  const home = os.homedir();
+  return file.startsWith(home + path.sep) ? `~${file.slice(home.length)}` : file;
 }
 
 function parseNumber(raw: string | undefined, flag: string): number | undefined {

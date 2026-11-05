@@ -91,7 +91,9 @@ describe("search tools", () => {
 describe("write protection", () => {
   test("file tools refuse to write into .git", async () => {
     await assert.rejects(run(writeFile, { path: ".git/hooks/pre-commit", content: "evil" }), /Refusing to modify \.git/);
-    await assert.rejects(run(editFile, { path: ".git/config", old_string: "a", new_string: "b" }), /Refusing to modify \.git/);
+    const edit = await run(editFile, { path: ".git/config", old_string: "a", new_string: "b" });
+    assert.equal(edit.isError, true);
+    assert.match(edit.content, /Refusing to modify \.git/);
   });
 });
 

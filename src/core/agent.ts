@@ -11,12 +11,14 @@ import {
   SUMMARY_PREFIX,
   trimOldToolResults,
 } from "./context.js";
+import type { DiffLine } from "./diff.js";
 import type { AgentEvent } from "./events.js";
 import { type ReasoningLevel, reasoningParams } from "./reasoning.js";
 import { Sandbox } from "./sandbox.js";
 import { type HistoryChange, type Message, messageText, repairHistory } from "./history.js";
 import { stripThinkTags, ThinkTagParser } from "./think.js";
 import { type ToolDef, type ToolResult, toApiTool, truncate } from "./tool.js";
+import { Checkpoint, restore } from "./undo.js";
 
 type AssistantMessage = OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam;
 
@@ -28,7 +30,21 @@ export interface ApprovalRequest {
   input: unknown;
   /** For tools that run in the sandbox: what the sandbox allows, or that there is none. */
   sandbox?: { active: boolean; description: string };
+  /** For file changes: the diff the call would apply. */
+  preview?: DiffLine[];
 }
+
+export interface UndoResult {
+  /** The undone turn's message, to put back in the input box. */
+  prompt: string;
+  restored: string[];
+  /** Files left alone because they changed after the agent wrote them. */
+  skipped: string[];
+  /** Tools that ran in the turn whose changes can't be undone (bash). */
+  untracked: string[];
+}
+
+const MAX_UNDO = 20;
 
 export interface AgentOptions {
   client: OpenAI;
@@ -90,6 +106,8 @@ export class Agent {
   private readonly toolsByName: Map<string, ToolDef>;
   private readonly apiTools: OpenAI.Chat.Completions.ChatCompletionTool[];
   private readonly alwaysAllowed = new Set<string>();
+  /** Recent turns, newest last: where each started in the history and what it changed. */
+  private turns: { start: number; prompt: string; checkpoint: Checkpoint }[] = [];
   private contextSize: number | undefined;
   private client: OpenAI;
   private modelId: string;
@@ -140,6 +158,26 @@ export class Agent {
   /** Clears the conversation but keeps the system prompt and "always allow" grants. */
   reset(): void {
     this.replaceHistory([]);
+    this.turns = [];
+  }
+
+  /** Whether /undo has something to undo. */
+  get canUndo(): boolean {
+    return this.turns.length > 0;
+  }
+
+  /**
+   * Undoes the last turn: puts back files it changed with the file tools and
+   * removes the turn from the conversation. Returns null if there's nothing
+   * to undo.
+   */
+  async undo(): Promise<UndoResult | null> {
+    const turn = this.turns.pop();
+    if (!turn) return null;
+    const { restored, skipped } = await restore(turn.checkpoint);
+    this.replaceHistory(this.history.slice(1, turn.start));
+    this.emitContext();
+    return { prompt: turn.prompt, restored, skipped, untracked: [...turn.checkpoint.untracked] };
   }
 
   /**
@@ -148,6 +186,8 @@ export class Agent {
    * Throws on API errors; interruption via `signal` is not an error.
    */
   async send(text: string, signal: AbortSignal): Promise<void> {
+    this.turns.push({ start: this.history.length, prompt: text, checkpoint: new Checkpoint() });
+    if (this.turns.length > MAX_UNDO) this.turns.shift();
     this.append({ role: "user", content: text });
     await this.interruptible(signal, () => this.loop(signal));
   }
@@ -294,8 +334,12 @@ export class Agent {
         ? [{ role: "user", content: `${intro}\n\n---\n\n${messageText(first)}` }, ...tail.slice(1)]
         : [{ role: "user", content: tail.length ? intro : `${intro}\n\nContinue the task from where it left off.` }, ...tail];
     this.replaceHistory(next);
+    // Turn boundaries no longer exist in the summarized history.
+    const hadUndo = this.turns.length > 0;
+    this.turns = [];
 
-    emit({ type: "notice", level: "info", text: `Summarized ${head.length} earlier messages (~${before.toLocaleString()} → ~${this.estimateContext().toLocaleString()} tokens).` });
+    const undoNote = hadUndo ? " Earlier turns can no longer be undone." : "";
+    emit({ type: "notice", level: "info", text: `Summarized ${head.length} earlier messages (~${before.toLocaleString()} → ~${this.estimateContext().toLocaleString()} tokens).${undoNote}` });
     this.emitContext();
     return true;
   }
@@ -436,12 +480,21 @@ export class Agent {
     const input = parsed.data;
     const summary = tool.summarize(input);
 
+    const ctx = this.toolContext(tool, signal);
     if (!tool.readOnly && !this.alwaysAllowed.has(tool.name)) {
+      // Show the change in the prompt; a call that would fail anyway fails without asking.
+      let preview: DiffLine[] | undefined;
+      try {
+        preview = await tool.preview?.(input, ctx);
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err), summary);
+      }
       const sandbox = this.opts.sandbox ?? Sandbox.none();
       const decision = await this.opts.approve({
         tool: tool.name,
         summary,
         input,
+        preview,
         sandbox: tool.sandboxed ? { active: sandbox.active, description: sandbox.describe() } : undefined,
       });
       if (decision === "deny" || signal.aborted) {
@@ -453,7 +506,7 @@ export class Agent {
     emit({ type: "tool_start", id: call.id, name: tool.name, summary });
     let result: ToolResult;
     try {
-      result = await tool.run(input, { cwd: this.opts.cwd, signal, sandbox: this.opts.sandbox });
+      result = await tool.run(input, ctx);
     } catch (err) {
       result = { content: err instanceof Error ? err.message : String(err), isError: true };
     }
@@ -464,7 +517,21 @@ export class Agent {
       summary,
       output: result.content,
       isError: result.isError ?? false,
+      diff: result.diff,
     });
     return result;
+  }
+
+  private toolContext(tool: ToolDef, signal: AbortSignal) {
+    const checkpoint = this.turns[this.turns.length - 1]?.checkpoint;
+    // Tools that change things without reporting what (bash) can't be undone.
+    if (checkpoint && !tool.readOnly && !tool.preview) checkpoint.untracked.add(tool.name);
+    return {
+      cwd: this.opts.cwd,
+      signal,
+      sandbox: this.opts.sandbox,
+      beforeWrite: (file: string) => checkpoint?.beforeWrite(file) ?? Promise.resolve(),
+      afterWrite: (file: string, content: string) => checkpoint?.afterWrite(file, content),
+    };
   }
 }

@@ -73,6 +73,12 @@ export interface SpawnSpec {
 }
 
 export class Sandbox {
+  /**
+   * Extra folders made visible read-only, after the hiding rules: skill
+   * folders, so a skill's scripts can run even from a hidden ~/.claude.
+   */
+  readOnlyPaths: string[] = [];
+
   private constructor(
     readonly active: boolean,
     /** Whether sandboxed commands can use the network. Can be changed at runtime. */
@@ -114,11 +120,11 @@ export class Sandbox {
     }
     const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => ENV_ALLOW.test(k)));
     env.TMPDIR = "/tmp";
-    return { file: "bwrap", args: [...bwrapArgs(cwd, this.network), "--", "bash", "-c", command], env };
+    return { file: "bwrap", args: [...bwrapArgs(cwd, this.network, this.readOnlyPaths), "--", "bash", "-c", command], env };
   }
 }
 
-export function bwrapArgs(cwd: string, network: boolean): string[] {
+export function bwrapArgs(cwd: string, network: boolean, readOnlyPaths: string[] = []): string[] {
   const args = ["--unshare-all"];
   if (network) args.push("--share-net");
   args.push("--die-with-parent", "--new-session");
@@ -136,6 +142,10 @@ export function bwrapArgs(cwd: string, network: boolean): string[] {
 
   const home = os.homedir();
   for (const rel of HIDDEN_HOME_PATHS) hide(args, path.join(home, rel));
+
+  for (const dir of readOnlyPaths) {
+    if (isDirectory(dir)) args.push("--ro-bind", dir, dir);
+  }
 
   const git = path.join(cwd, ".git");
   if (fs.existsSync(git)) args.push("--ro-bind", git, git);

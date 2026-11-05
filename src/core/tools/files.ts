@@ -2,7 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { assertWritable, resolveInRoot } from "../paths.js";
-import { defineTool, truncate } from "../tool.js";
+import { diffLines, diffStats } from "../diff.js";
+import { defineTool, type ToolContext, truncate } from "../tool.js";
 
 const MAX_OUTPUT_CHARS = 20_000;
 const DEFAULT_LINE_LIMIT = 500;
@@ -46,24 +47,64 @@ export const readFile = defineTool({
   },
 });
 
+const writeSchema = z.object({
+  path: z.string().describe("File path, relative to the working directory"),
+  content: z.string().describe("The full file contents"),
+});
+
+/** Works out a write without doing it, so the approval prompt can show the diff. */
+async function planWrite({ path: p, content }: z.output<typeof writeSchema>, ctx: ToolContext) {
+  const file = await resolveInRoot(ctx.cwd, p);
+  assertWritable(ctx.cwd, file);
+  const before = await readIfExists(file);
+  return { file, content, created: before === null, diff: diffLines(before ?? "", content) };
+}
+
 export const writeFile = defineTool({
   name: "write_file",
   description:
     "Create a file or overwrite it completely. Prefer edit_file for changes to existing files.",
-  schema: z.object({
-    path: z.string().describe("File path, relative to the working directory"),
-    content: z.string().describe("The full file contents"),
-  }),
+  schema: writeSchema,
   readOnly: false,
   summarize: ({ path: p, content }) => `${p} (${content.split("\n").length} lines)`,
-  async run({ path: p, content }, ctx) {
-    const file = await resolveInRoot(ctx.cwd, p);
-    assertWritable(ctx.cwd, file);
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.writeFile(file, content, "utf8");
-    return { content: `Wrote ${Buffer.byteLength(content)} bytes to ${p}.` };
+  preview: async (input, ctx) => (await planWrite(input, ctx)).diff,
+  async run(input, ctx) {
+    const plan = await planWrite(input, ctx);
+    await ctx.beforeWrite?.(plan.file);
+    await fs.mkdir(path.dirname(plan.file), { recursive: true });
+    await fs.writeFile(plan.file, plan.content, "utf8");
+    ctx.afterWrite?.(plan.file, plan.content);
+    const { added, removed } = diffStats(plan.diff);
+    const verb = plan.created ? "Created" : "Wrote";
+    return { content: `${verb} ${input.path} (+${added} -${removed} lines).`, diff: plan.diff };
   },
 });
+
+const editSchema = z.object({
+  path: z.string().describe("File path, relative to the working directory"),
+  old_string: z.string().min(1).describe("Exact text to replace"),
+  new_string: z.string().describe("Replacement text"),
+  replace_all: z.boolean().optional().describe("Replace every occurrence instead of exactly one"),
+});
+
+/** Works out an edit without doing it. Throws with a message for the model if it can't apply. */
+async function planEdit({ path: p, old_string, new_string, replace_all }: z.output<typeof editSchema>, ctx: ToolContext) {
+  if (old_string === new_string) throw new Error("old_string and new_string are identical; nothing to change.");
+  const file = await resolveInRoot(ctx.cwd, p);
+  assertWritable(ctx.cwd, file);
+  const text = await fs.readFile(file, "utf8");
+  const count = text.split(old_string).length - 1;
+  if (count === 0) throw new Error(`old_string was not found in ${p}. Read the file and copy the text exactly.`);
+  if (count > 1 && !replace_all) {
+    throw new Error(`old_string occurs ${count} times in ${p}. Include more surrounding text to make it unique, or set replace_all.`);
+  }
+  // split/join and slice avoid String.replace's special `$` patterns.
+  const at = text.indexOf(old_string);
+  const updated = replace_all
+    ? text.split(old_string).join(new_string)
+    : text.slice(0, at) + new_string + text.slice(at + old_string.length);
+  return { file, updated, replaced: replace_all ? count : 1, diff: diffLines(text, updated) };
+}
 
 export const editFile = defineTool({
   name: "edit_file",
@@ -71,39 +112,31 @@ export const editFile = defineTool({
     "Replace an exact string in a file. old_string must match the file exactly, including " +
     "whitespace and indentation, and must occur exactly once unless replace_all is true. " +
     "Read the file first so the match is exact.",
-  schema: z.object({
-    path: z.string().describe("File path, relative to the working directory"),
-    old_string: z.string().min(1).describe("Exact text to replace"),
-    new_string: z.string().describe("Replacement text"),
-    replace_all: z.boolean().optional().describe("Replace every occurrence instead of exactly one"),
-  }),
+  schema: editSchema,
   readOnly: false,
   summarize: ({ path: p, replace_all }) => (replace_all ? `${p} (all occurrences)` : p),
-  async run({ path: p, old_string, new_string, replace_all }, ctx) {
-    if (old_string === new_string) {
-      return { content: "old_string and new_string are identical; nothing to change.", isError: true };
+  preview: async (input, ctx) => (await planEdit(input, ctx)).diff,
+  async run(input, ctx) {
+    let plan: Awaited<ReturnType<typeof planEdit>>;
+    try {
+      plan = await planEdit(input, ctx);
+    } catch (err) {
+      return { content: (err as Error).message, isError: true };
     }
-    const file = await resolveInRoot(ctx.cwd, p);
-    assertWritable(ctx.cwd, file);
-    const text = await fs.readFile(file, "utf8");
-    const count = text.split(old_string).length - 1;
-
-    if (count === 0) {
-      return { content: `old_string was not found in ${p}. Read the file and copy the text exactly.`, isError: true };
-    }
-    if (count > 1 && !replace_all) {
-      return {
-        content: `old_string occurs ${count} times in ${p}. Include more surrounding text to make it unique, or set replace_all.`,
-        isError: true,
-      };
-    }
-
-    // split/join and slice avoid String.replace's special `$` patterns.
-    const updated = replace_all
-      ? text.split(old_string).join(new_string)
-      : text.slice(0, text.indexOf(old_string)) + new_string + text.slice(text.indexOf(old_string) + old_string.length);
-    await fs.writeFile(file, updated, "utf8");
-    const replaced = replace_all ? count : 1;
-    return { content: `Replaced ${replaced} occurrence${replaced === 1 ? "" : "s"} in ${p}.` };
+    await ctx.beforeWrite?.(plan.file);
+    await fs.writeFile(plan.file, plan.updated, "utf8");
+    ctx.afterWrite?.(plan.file, plan.updated);
+    const { added, removed } = diffStats(plan.diff);
+    const times = plan.replaced === 1 ? "1 occurrence" : `${plan.replaced} occurrences`;
+    return { content: `Replaced ${times} in ${input.path} (+${added} -${removed} lines).`, diff: plan.diff };
   },
 });
+
+async function readIfExists(file: string): Promise<string | null> {
+  try {
+    return await fs.readFile(file, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+}
