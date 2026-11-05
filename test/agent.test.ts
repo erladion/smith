@@ -190,6 +190,17 @@ test("recovers from a llama.cpp context-overflow error by compacting and retryin
   assert.equal(ctx?.type === "context" && ctx.limit, 8192);
 });
 
+test("loading a saved conversation replaces history without recording it", async () => {
+  const { agent, changes } = makeAgent();
+  agent.loadConversation([
+    { role: "user", content: "earlier" },
+    { role: "assistant", content: "reply" },
+  ]);
+  assert.deepEqual(agent.messages.slice(1).map((m) => m.content), ["earlier", "reply"]);
+  assert.deepEqual(changes, []);
+  assert.equal(agent.canUndo, false);
+});
+
 test("a resumed history with an unanswered tool call is repaired", async () => {
   const history: Message[] = [
     { role: "user", content: "do it" },

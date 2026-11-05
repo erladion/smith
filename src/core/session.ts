@@ -2,7 +2,8 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { HistoryChange, Message } from "./history.js";
+import { SUMMARY_PREFIX } from "./context.js";
+import { type HistoryChange, type Message, messageText } from "./history.js";
 
 /**
  * Sessions are append-only JSONL logs, one file per conversation:
@@ -33,6 +34,8 @@ export interface SessionInfo {
   file: string;
   /** First user message, for listings. */
   preview: string;
+  /** Number of messages you sent. */
+  turns: number;
 }
 
 export function sessionsDir(): string {
@@ -116,25 +119,46 @@ export class Session {
   }
 }
 
-/** Sessions, newest first, optionally only those started in `cwd`. */
-export function listSessions(cwd?: string): SessionInfo[] {
+/**
+ * Sessions, newest first, optionally only those started in `cwd`. Reads
+ * files newest first and stops after `limit` matches, so long histories
+ * stay quick to list.
+ */
+export function listSessions(cwd?: string, limit = Infinity): SessionInfo[] {
   const dir = sessionsDir();
   if (!fs.existsSync(dir)) return [];
+  const files = fs
+    .readdirSync(dir)
+    .filter((name) => name.endsWith(".jsonl"))
+    .map((name) => {
+      const file = path.join(dir, name);
+      return { file, updated: fs.statSync(file).mtime };
+    })
+    .sort((a, b) => b.updated.getTime() - a.updated.getTime());
+
   const infos: SessionInfo[] = [];
-  for (const name of fs.readdirSync(dir)) {
-    if (!name.endsWith(".jsonl")) continue;
-    const file = path.join(dir, name);
+  for (const { file, updated } of files) {
+    if (infos.length >= limit) break;
     try {
       const { meta, messages, model, endpoint } = readLog(file);
       if (cwd && meta.cwd !== cwd) continue;
-      const firstUser = messages.find((m) => m.role === "user");
-      const preview = typeof firstUser?.content === "string" ? firstUser.content : "";
-      infos.push({ ...meta, model, endpoint, file, updated: fs.statSync(file).mtime, preview: preview.replace(/\s+/g, " ").slice(0, 80) });
+      const users = messages.filter((m) => m.role === "user").map(messageText);
+      infos.push({ ...meta, model, endpoint, file, updated, preview: preview(users[0] ?? ""), turns: users.length });
     } catch {
       // Unreadable or foreign file; skip it.
     }
   }
-  return infos.sort((a, b) => b.updated.getTime() - a.updated.getTime());
+  return infos;
+}
+
+/** One line from a session's first message; after compaction, the message following the summary. */
+function preview(first: string): string {
+  let text = first;
+  if (text.startsWith(SUMMARY_PREFIX)) {
+    const sep = text.indexOf("\n\n---\n\n");
+    text = sep === -1 ? "(summarized conversation)" : text.slice(sep + 7);
+  }
+  return text.replace(/\s+/g, " ").trim().slice(0, 100);
 }
 
 function readLog(file: string): {

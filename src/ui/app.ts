@@ -5,6 +5,7 @@ import type { AgentEvent, BlockKind } from "../core/events.js";
 import type { Message } from "../core/history.js";
 import { isReasoningLevel, REASONING_HINTS, REASONING_LEVELS, type ReasoningLevel } from "../core/reasoning.js";
 import type { Sandbox } from "../core/sandbox.js";
+import type { SessionInfo } from "../core/session.js";
 import { Server } from "../core/server.js";
 import type { ToolDef } from "../core/tool.js";
 import { LineEditor } from "./editor.js";
@@ -28,6 +29,17 @@ export interface PreferenceUpdate {
   reasoning?: ReasoningLevel;
 }
 
+/** Lets the UI list, open and start sessions; the CLI owns which one is recorded to. */
+export interface SessionControl {
+  currentId(): string;
+  /** This folder's sessions, newest first. */
+  list(): SessionInfo[];
+  /** Makes `id` the session being recorded and returns its conversation and last model. */
+  open(id: string): { messages: Message[]; model: string; endpoint?: string };
+  /** Starts recording to a new session (its file appears with the first message). */
+  startNew(model: string, endpoint: string | undefined): void;
+}
+
 export interface TuiOptions {
   createAgent: (hooks: AgentHooks) => Agent;
   /** The server the agent starts on. */
@@ -41,7 +53,7 @@ export interface TuiOptions {
   rememberedModel: (baseURL: string) => string | undefined;
   sandbox: Sandbox;
   cwd: string;
-  sessionId: string;
+  sessions: SessionControl;
   /** Conversation restored from a saved session, shown before the prompt. */
   resumed: Message[];
   tools: ToolDef[];
@@ -62,14 +74,26 @@ const HELP = `Commands:
   /endpoint [name]    pick a configured endpoint, or switch to one by name
   /model [name]       pick a model from the server, or switch to one by name
   /reasoning [level]  pick how much the model thinks: ${REASONING_LEVELS.join(", ")}
+  /sessions           switch to another session from this folder
+  /new                start a new session (/clear does the same)
   /undo               undo the last turn: restore files it changed and edit your message again
   /skills             list the available skills
   /network on|off     allow or block network access for sandboxed commands
   /compact            summarize the conversation now to free context
-  /clear              start the conversation over
   /exit               quit
 Keys: enter sends · shift+enter, \\ then enter, or ctrl+j adds a new line · esc interrupts the agent
       ↑/↓ recall earlier input · ctrl+c quits`;
+
+/** "just now", "5 min ago", "3 h ago", "yesterday", or a date. */
+function ago(date: Date): string {
+  const minutes = Math.round((Date.now() - date.getTime()) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  if (hours < 48) return "yesterday";
+  return date.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -84,7 +108,7 @@ export class TuiApp {
   private live: { kind: BlockKind; text: string } | null = null;
   private activity: string | null = null;
   private approval: (ApprovalRequest & { resolve: (d: ApprovalDecision) => void }) | null = null;
-  private picker: { kind: "endpoint" | "model" | "reasoning"; picker: Picker } | null = null;
+  private picker: { kind: "endpoint" | "model" | "reasoning" | "session"; picker: Picker } | null = null;
   private busy = false;
   private abort: AbortController | null = null;
   private context: { tokens: number; limit?: number } | null = null;
@@ -122,23 +146,37 @@ export class TuiApp {
     output.write("\x1b[?25l\x1b[?2004h\x1b[>1u");
     process.once("exit", this.restoreTerminal);
 
-    const { sandbox, cwd, sessionId, resumed, tools } = this.opts;
+    this.printBanner(this.opts.resumed.length > 0);
+    for (const text of this.opts.warnings) this.print({ kind: "notice", level: "warn", text });
+    for (const entry of historyToEntries(this.opts.resumed, this.opts.tools)) this.print(entry);
+    this.render();
+
+    return new Promise((resolve) => (this.finished = resolve));
+  }
+
+  private printBanner(resumed: boolean): void {
+    const { sandbox, cwd } = this.opts;
     this.print({
       kind: "banner",
       model: this.agent.model,
       server: this.server.label,
       cwd,
-      session: sessionId,
-      resumed: resumed.length > 0,
+      session: this.opts.sessions.currentId(),
+      resumed,
       sandbox: { active: sandbox.active, description: sandbox.describe() },
       instructions: this.opts.instructions,
       skills: this.opts.skills.map((s) => s.name),
     });
-    for (const text of this.opts.warnings) this.print({ kind: "notice", level: "warn", text });
-    for (const entry of historyToEntries(resumed, tools)) this.print(entry);
-    this.render();
+  }
 
-    return new Promise((resolve) => (this.finished = resolve));
+  /** Clears the screen and starts a fresh transcript (new or switched session). */
+  private startOver(resumed: boolean, entries: Entry[]): void {
+    this.renderer.reset();
+    this.transcript.length = 0;
+    this.live = null;
+    this.context = null;
+    this.printBanner(resumed);
+    for (const entry of entries) this.print(entry);
   }
 
   // ---- terminal plumbing ----
@@ -410,10 +448,12 @@ export class TuiApp {
           return this.exit();
         case "/help":
           return this.print({ kind: "notice", level: "info", text: HELP });
+        case "/new":
         case "/clear":
-          this.agent.reset();
-          this.context = null;
-          return this.print({ kind: "notice", level: "info", text: "Conversation cleared." });
+          return this.newSession();
+        case "/sessions":
+        case "/resume":
+          return this.openSessionPicker();
         case "/network":
           return this.setNetwork(arg);
         case "/undo":
@@ -476,6 +516,48 @@ export class TuiApp {
     }
   }
 
+  private newSession(): void {
+    const previous = this.opts.sessions.currentId();
+    this.opts.sessions.startNew(this.agent.model, this.server.name);
+    this.agent.loadConversation([]);
+    this.startOver(false, [{ kind: "notice", level: "info", text: `Started a new session. The previous one is ${previous}; /sessions switches back.` }]);
+  }
+
+  private openSessionPicker(): void {
+    const current = this.opts.sessions.currentId();
+    const sessions = this.opts.sessions.list();
+    if (sessions.length === 0 || (sessions.length === 1 && sessions[0]!.id === current)) {
+      return this.print({ kind: "notice", level: "info", text: "There are no other saved sessions for this folder." });
+    }
+    const items = sessions.map((s) => ({
+      value: s.id,
+      label: s.preview || "(no messages)",
+      hint: `${ago(s.updated)} · ${s.turns} message${s.turns === 1 ? "" : "s"} · ${s.endpoint ? `${s.endpoint}/` : ""}${s.model}`,
+    }));
+    this.picker = { kind: "session", picker: new Picker("Switch session", items, current) };
+  }
+
+  private async switchSession(id: string): Promise<void> {
+    let opened: ReturnType<SessionControl["open"]>;
+    try {
+      opened = this.opts.sessions.open(id);
+    } catch (err) {
+      return this.print({ kind: "notice", level: "error", text: `Could not open session ${id}: ${(err as Error).message}` });
+    }
+    this.agent.loadConversation(opened.messages);
+    this.startOver(true, historyToEntries(opened.messages, this.opts.tools));
+
+    // Continue on the endpoint and model the session last used, when they're available.
+    const { endpoint, model } = opened;
+    if (endpoint && endpoint !== this.server.name && this.opts.endpoints.some((e) => e.name === endpoint)) {
+      await this.switchEndpoint(endpoint, model);
+    } else if (model !== this.agent.model) {
+      const served = await this.server.listModels().catch(() => []);
+      if (served.some((m) => m.id === model)) await this.switchModel(model);
+      else this.print({ kind: "notice", level: "warn", text: `This session used ${model}, which ${this.server.label} doesn't serve; continuing with ${this.agent.model}.` });
+    }
+  }
+
   private async undo(): Promise<void> {
     const result = await this.agent.undo();
     if (!result) return this.print({ kind: "notice", level: "info", text: "Nothing to undo." });
@@ -512,6 +594,7 @@ export class TuiApp {
     const open = this.picker;
     this.picker = null;
     if (open?.kind === "endpoint" && value !== this.server.name) void this.switchEndpoint(value);
+    if (open?.kind === "session" && value !== this.opts.sessions.currentId()) void this.switchSession(value);
     if (open?.kind === "model" && value !== this.agent.model) void this.switchModel(value);
     if (open?.kind === "reasoning" && isReasoningLevel(value) && value !== this.agent.reasoning) this.switchReasoning(value);
   }
@@ -532,7 +615,7 @@ export class TuiApp {
     this.print({ kind: "notice", level: "info", text: `Reasoning: ${level} (${REASONING_HINTS[level]}).` });
   }
 
-  private switchEndpoint(name: string): Promise<void> {
+  private switchEndpoint(name: string, preferredModel?: string): Promise<void> {
     const endpoint = this.opts.endpoints.find((e) => e.name === name);
     if (!endpoint) {
       const known = this.opts.endpoints.map((e) => e.name).join(", ") || "none";
@@ -541,7 +624,7 @@ export class TuiApp {
     }
     return this.withActivity(`Connecting to ${name}…`, async () => {
       const next = Server.fromEndpoint(endpoint);
-      const model = await next.chooseModel([this.opts.rememberedModel(next.baseURL)]);
+      const model = await next.chooseModel([preferredModel, this.opts.rememberedModel(next.baseURL)]);
       const contextSize = await next.contextSize(model);
       this.agent.setModel(model, contextSize, next.client);
       this.server = next;

@@ -20,8 +20,31 @@ and the bundled app. Copy it to the target machine and run it; it needs no Node,
 
 - Building needs Node 26 or newer (for `node --build-sea`). The target needs no Node at all.
 - The binary is for the OS and CPU it was built on, e.g. Linux x64. It needs glibc 2.28 or
-  newer (RHEL 9 has 2.34) and `libatomic`, which minimal RHEL installs may lack:
-  `sudo dnf install libatomic`.
+  newer (RHEL 9 has 2.34) and `libatomic`, which RHEL 9 doesn't install by default; without
+  it the binary won't start: `sudo dnf install libatomic`. (Checked on RHEL 9.8.)
+- `agent --version` shows the version it was built as.
+
+## Releases
+
+`.github/workflows/release.yml` builds and publishes releases. To make one, set `version` in
+`package.json`, commit, and push a matching tag:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The workflow typechecks, runs the tests (with bubblewrap, so the sandbox tests run too),
+builds the binary, checks that it starts on RHEL 9 (Red Hat's UBI 9 image), and publishes a
+GitHub release with `agent-<version>-linux-x64.gz` and `SHA256SUMS`. A tag that doesn't match
+`package.json` fails the run. Running the workflow by hand from the Actions tab builds and tests
+without releasing, and keeps the binary as a workflow artifact. To install a release:
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+gunzip -c agent-*-linux-x64.gz > agent && chmod +x agent
+sudo mv agent /usr/local/bin/
+sudo dnf install libatomic bubblewrap
+```
 - bubblewrap is still needed on the target for the shell sandbox.
 
 ## Running against llama.cpp
@@ -90,7 +113,8 @@ configured endpoint they weren't set for. The file is only read, never written.
 | `/undo` | undo the last turn: restore the files it changed and edit your message again |
 | `/skills` | list the available skills |
 | `/compact` | summarize the conversation now |
-| `/clear` | start over |
+| `/sessions` | switch to another session from this folder (type to search by first message) |
+| `/new` | start a new session; `/clear` does the same, and the old one stays resumable |
 | `/help`, `/exit` | |
 
 Enter sends, ↑/↓ recall earlier input, Esc interrupts the agent and Ctrl+C quits. For a new line
@@ -164,8 +188,9 @@ alone. Undo history lives in memory, so it doesn't survive a restart or a compac
 
 Every conversation is saved as an append-only JSONL log in `~/.local/share/agent/sessions/`.
 `--sessions` lists the ones for the current directory, `-c` resumes the latest, and
-`--resume <id>` resumes a specific one. Resuming replays the transcript and continues with
-the model the session last used.
+`--resume <id>` resumes a specific one. In the TUI, `/sessions` switches between them and `/new`
+starts a fresh one. Resuming or switching replays the transcript and continues on the endpoint
+and model the session last used, when they're still available.
 
 ## Context management
 

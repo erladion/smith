@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
-import { chooseTail, trimOldToolResults } from "../src/core/context.js";
+import { chooseTail, SUMMARY_PREFIX, trimOldToolResults } from "../src/core/context.js";
 import type { Message } from "../src/core/history.js";
 import { listSessions, Session } from "../src/core/session.js";
 import { ThinkTagParser } from "../src/core/think.js";
@@ -92,5 +92,24 @@ describe("sessions", () => {
     assert.equal(listed.length, 1);
     assert.equal(listed[0]!.id, session.id);
     assert.equal(listSessions("/elsewhere").length, 0);
+  });
+
+  test("listings show the first message, skip summaries, count turns and respect the limit", async () => {
+    const make = async (first: string, extra: string[]) => {
+      const s = Session.create("/listing", "m");
+      s.record({ type: "append", message: { role: "user", content: first } });
+      for (const text of extra) s.record({ type: "append", message: { role: "user", content: text } });
+      await new Promise((r) => setTimeout(r, 15)); // distinct modification times
+      return s.id;
+    };
+    const older = await make("Fix   the\nlogin bug", ["and the tests"]);
+    const newer = await make(`${SUMMARY_PREFIX}summary text\n\n---\n\nAdd a version flag`, []);
+
+    const listed = listSessions("/listing");
+    assert.deepEqual(listed.map((s) => [s.id, s.preview, s.turns]), [
+      [newer, "Add a version flag", 1],
+      [older, "Fix the login bug", 2],
+    ]);
+    assert.deepEqual(listSessions("/listing", 1).map((s) => s.id), [newer]);
   });
 });

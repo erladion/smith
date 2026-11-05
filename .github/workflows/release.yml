@@ -1,0 +1,137 @@
+# Builds the single binary and, for a version tag, publishes a GitHub release.
+#
+# To release: set "version" in package.json, commit, then
+#   git tag v1.2.3 && git push origin v1.2.3
+#
+# Run it by hand (Actions → Release → Run workflow) to build and test
+# without releasing; the binary is kept as a workflow artifact.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-24.04
+          # Uncomment for ARM64 if your repository can use GitHub's Arm runners.
+          # - target: linux-arm64
+          #   runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 26 is needed to build the binary (node --build-sea); the binary
+      # carries its own Node, so the target machine needs none.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install bubblewrap and ripgrep, so the sandbox and search tests run
+        run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap ripgrep
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Work out the version
+        id: version
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [[ "$version" != "$pkg" ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME doesn't match package.json version $pkg. Update package.json and tag again."
+              exit 1
+            fi
+          else
+            version="$pkg-dev.${GITHUB_SHA::7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build the binary
+        env:
+          AGENT_VERSION: ${{ steps.version.outputs.version }}
+        run: npm run build:binary
+
+      - name: Check that it runs on RHEL 9
+        run: |
+          docker run --rm -v "$PWD/build/agent:/usr/local/bin/agent:ro" registry.access.redhat.com/ubi9/ubi:latest \
+            sh -c 'dnf install -y -q libatomic && agent --version'
+
+      - name: Package
+        run: |
+          # A single gzipped file: unpacking needs only gunzip, which even
+          # minimal systems have (unlike xz, and not always tar).
+          name="agent-${{ steps.version.outputs.version }}-${{ matrix.target }}"
+          mkdir -p dist
+          gzip -9 -c build/agent > "dist/$name.gz"
+          (cd dist && sha256sum "$name.gz" > "$name.gz.sha256")
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat dist/*.sha256 > dist/SHA256SUMS
+          rm dist/*.sha256
+          cat > notes.md <<'EOF'
+          ## Install
+
+          Download the `.gz` file for your machine and `SHA256SUMS`, then:
+
+          ```sh
+          sha256sum --check --ignore-missing SHA256SUMS
+          gunzip -c agent-*-linux-x64.gz > agent && chmod +x agent
+          sudo mv agent /usr/local/bin/
+          ```
+
+          The binary contains its own Node.js. On RHEL 9 it needs two system packages:
+
+          ```sh
+          sudo dnf install libatomic bubblewrap
+          ```
+
+          `libatomic` is required (the binary won't start without it); `bubblewrap` runs shell
+          commands in a sandbox and is strongly recommended.
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            --generate-notes

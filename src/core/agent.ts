@@ -161,6 +161,18 @@ export class Agent {
     this.turns = [];
   }
 
+  /**
+   * Replaces the conversation with a saved one (switching sessions). Unlike
+   * other changes this isn't reported to onHistory: the session being opened
+   * already contains it.
+   */
+  loadConversation(messages: Message[]): void {
+    this.history.splice(1, this.history.length, ...repairHistory(messages));
+    this.measured = null;
+    this.turns = [];
+    this.emitContext();
+  }
+
   /** Whether /undo has something to undo. */
   get canUndo(): boolean {
     return this.turns.length > 0;

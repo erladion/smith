@@ -25,6 +25,10 @@ if (!nodeHelp.includes("--build-sea")) {
   process.exit(1);
 }
 
+// The version baked into the binary: AGENT_VERSION (set by the release workflow
+// from the git tag), else package.json's.
+const version = process.env.AGENT_VERSION || JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
+
 fs.mkdirSync(out, { recursive: true });
 
 await build({
@@ -34,6 +38,7 @@ await build({
   platform: "node",
   target: "node22",
   format: "esm",
+  define: { __AGENT_VERSION__: JSON.stringify(version) },
   logLevel: "warning",
 });
 
@@ -44,12 +49,12 @@ fs.writeFileSync(
 execFileSync(process.execPath, ["--build-sea", seaConfig], { stdio: "inherit" });
 
 // Smoke test without Node on PATH, so we know the binary is self-contained.
-const help = execFileSync(binary, ["--help"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: process.env.HOME } });
-if (!help.startsWith("Usage: agent")) {
-  console.error("The built binary did not start correctly:\n" + help);
+const reported = execFileSync(binary, ["--version"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: process.env.HOME } }).trim();
+if (reported !== `agent ${version}`) {
+  console.error(`The built binary did not start correctly; --version printed:\n${reported}`);
   process.exit(1);
 }
 
 const mb = (file) => `${(fs.statSync(file).size / 1024 / 1024).toFixed(0)} MB`;
-console.log(`\nBuilt ${path.relative(root, binary)} (${mb(binary)}, Node ${process.version}, ${process.platform}-${process.arch}).`);
+console.log(`\nBuilt ${path.relative(root, binary)} ${version} (${mb(binary)}, Node ${process.version}, ${process.platform}-${process.arch}).`);
 console.log("Copy it anywhere and run it; nothing else is needed except bubblewrap for the sandbox.");

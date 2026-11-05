@@ -18,6 +18,7 @@ import { defaultTools } from "./core/tools/index.js";
 import { createSkillTool } from "./core/tools/skill.js";
 import { type AgentHooks, TuiApp } from "./ui/app.js";
 import { describeError } from "./core/errors.js";
+import { VERSION } from "./version.js";
 
 const HELP = `Usage: agent [options]
 
@@ -45,6 +46,7 @@ One-shot:
   -p, --print <prompt>   Run one prompt without the TUI and print the answer
   -y, --yes              With --print, allow every tool call without asking
 
+  -v, --version          Show the version
   -h, --help             Show this help
 
 Endpoints are configured in ~/.config/agent/config.json; run --endpoints for an example.`;
@@ -68,10 +70,15 @@ async function main(): Promise<void> {
       print: { type: "string", short: "p" },
       yes: { type: "boolean", short: "y" },
       help: { type: "boolean", short: "h" },
+      version: { type: "boolean", short: "v" },
     },
   });
   if (values.help) {
     console.log(HELP);
+    return;
+  }
+  if (values.version) {
+    console.log(`agent ${VERSION}`);
     return;
   }
 
@@ -117,7 +124,8 @@ async function main(): Promise<void> {
   sandbox.readOnlyPaths = skills.map((s) => s.dir);
   const warnings = [...config.warnings, ...skillWarnings];
 
-  const session = resumed?.session ?? Session.create(cwd, model, server.name);
+  // The session being recorded; /sessions and /new in the TUI switch it.
+  let session = resumed?.session ?? Session.create(cwd, model, server.name);
   session.recordModel(model, server.name);
   const history = resumed?.messages ?? [];
   const createAgent = (hooks: AgentHooks) =>
@@ -156,7 +164,18 @@ async function main(): Promise<void> {
     rememberedModel: (baseURL) => loadPreferences().models?.[baseURL],
     sandbox,
     cwd,
-    sessionId: session.id,
+    sessions: {
+      currentId: () => session.id,
+      list: () => listSessions(cwd, 50),
+      open: (id) => {
+        const opened = Session.open(id);
+        session = opened.session;
+        return { messages: opened.messages, model: session.model, endpoint: session.endpoint };
+      },
+      startNew: (model, endpoint) => {
+        session = Session.create(cwd, model, endpoint);
+      },
+    },
     resumed: history,
     tools,
     instructions: instructions.map((f) => displayPath(f.path, cwd)),
