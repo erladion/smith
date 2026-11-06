@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { LineEditor } from "../src/ui/editor.js";
 import { box } from "../src/ui/entries.js";
+import { greeting } from "../src/ui/greetings.js";
 import { KeyReader } from "../src/ui/keys.js";
 import { inline, markdownLines, safeSplit } from "../src/ui/markdown.js";
 import { Picker } from "../src/ui/picker.js";
@@ -251,4 +252,12 @@ describe("renderer", () => {
     assert.equal(s.writes[1], "\x1b[H\x1b[2J\x1b[3J");
     assert.equal(strip(s.writes[2]!), "c", "nothing left to erase after a reset");
   });
+});
+
+test("Agent Smith greets Mr. Anderson, and says we meet again on a resumed session", () => {
+  for (const r of [0, 0.5, 0.999]) {
+    assert.match(greeting(false, () => r), /Mr\. Anderson/);
+    assert.match(greeting(true, () => r), /Mr\. Anderson/);
+  }
+  assert.equal(greeting(true, () => 0), "We meet again, Mr. Anderson.");
 });

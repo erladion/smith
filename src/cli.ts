@@ -20,6 +20,7 @@ import { fastTools } from "./core/toolchain.js";
 import { defaultTools } from "./core/tools/index.js";
 import { createSkillTool } from "./core/tools/skill.js";
 import { type AgentHooks, type AgentSettings, type ProjectView, TuiApp } from "./ui/app.js";
+import { FAREWELL } from "./ui/greetings.js";
 import { describeError } from "./core/errors.js";
 import { VERSION } from "./version.js";
 
@@ -224,7 +225,7 @@ async function main(): Promise<void> {
       });
     },
   }).run();
-  console.log(`Session ${session.id}. Resume with: agent --resume ${session.id}`);
+  console.log(`${FAREWELL}\nSession ${session.id}. Resume with: agent --resume ${session.id}`);
 }
 
 interface Project {

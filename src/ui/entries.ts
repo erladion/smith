@@ -17,6 +17,8 @@ export type Entry =
       /** Instruction files in use, for display. */
       instructions: string[];
       skills: string[];
+      /** Agent Smith's welcome line. */
+      greeting?: string;
     }
   | { kind: "user"; text: string }
   /** Assistant text, rendered as Markdown. */
@@ -55,7 +57,8 @@ function bannerLines(b: Extract<Entry, { kind: "banner" }>, width: number): Line
     : [{ text: `⚠ shell commands are ${b.sandbox.description}`, style: { color: "red" } }];
   return box(
     [
-      [{ text: "agent", style: { bold: true, color: "cyan" } }],
+      [{ text: "Agent Smith", style: { bold: true, color: "cyan" } }],
+      ...(b.greeting ? ([[{ text: b.greeting, style: { color: "green", italic: true } }], []] as Line[]) : []),
       [{ text: `model   ${b.model}`, style: DIM }],
       [{ text: `server  ${b.server}`, style: DIM }],
       [{ text: `cwd     ${b.cwd}`, style: DIM }],

@@ -19,6 +19,7 @@ import { markdownLines, safeSplit } from "./markdown.js";
 import { Picker } from "./picker.js";
 import { InlineRenderer } from "./renderer.js";
 import { isGitRepo, listFolders, tildify } from "./folders.js";
+import { greeting } from "./greetings.js";
 import { historyToEntries } from "./replay.js";
 import type { Line } from "./style.js";
 import { prefixed, truncate, wrap } from "./text.js";
@@ -198,6 +199,7 @@ export class TuiApp {
       sandbox: { active: sandbox.active, description: sandbox.describe() },
       instructions: this.project.instructions,
       skills: this.project.skills.map((s) => s.name),
+      greeting: greeting(resumed),
     });
   }
 
