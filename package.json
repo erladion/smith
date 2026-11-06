@@ -1,6 +1,6 @@
 {
   "name": "agent",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A small agentic coding harness with a terminal UI for OpenAI-compatible endpoints",
   "scripts": {
     "dev": "tsx src/cli.ts",
@@ -8,7 +8,8 @@
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
-    "build:binary": "node scripts/build-binary.mjs"
+    "build:binary": "node scripts/build-binary.mjs",
+    "build:binary:bun": "node scripts/build-binary-bun.mjs"
   },
   "author": "",
   "license": "ISC",
@@ -18,6 +19,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@oven/bun-linux-x64-baseline": "1.4.4",
     "@types/node": "^26.6.6",
     "esbuild": "0.28.2",
     "tsx": "^4.23.15",

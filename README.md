@@ -14,8 +14,19 @@ The only npm runtime dependencies are `openai` and `zod`, neither of which has d
 
 ## Single binary
 
-`npm run build:binary` produces `build/agent`: one executable (about 150 MB) containing Node.js
-and the bundled app. Copy it to the target machine and run it; it needs no Node, npm or
+There are two builds of the same app:
+
+| | `npm run build:binary` → `build/agent` | `npm run build:binary:bun` → `build/agent-bun` |
+|---|---|---|
+| Runtime inside | Node.js | Bun (baseline build: any x86-64 CPU) |
+| Size | ~145 MB | ~105 MB |
+| Needs on the target | glibc 2.28+, `libatomic` | glibc 2.17+ only |
+
+Both are checked on RHEL 9 by the release workflow: the Bun build on the minimal image with
+nothing installed. Bun comes from npm as a dev dependency, so offline builds work from the npm
+cache as before (the cache grows by about 100 MB).
+
+The Node build, `build/agent`, is one executable containing Node.js and the bundled app. Copy it to the target machine and run it; it needs no Node, npm or
 `node_modules` there.
 
 - Building needs Node 26 or newer (for `node --build-sea`). The target needs no Node at all.
@@ -35,7 +46,8 @@ git tag v0.2.0 && git push origin v0.2.0
 
 The workflow typechecks, runs the tests (with bubblewrap, so the sandbox tests run too),
 builds the binary, checks that it starts on RHEL 9 (Red Hat's UBI 9 image), and publishes a
-GitHub release with `agent-<version>-linux-x64.tar.gz` (the binary and this README) and
+GitHub release with both builds, `agent-<version>-linux-x64.tar.gz` (Node) and
+`agent-<version>-linux-x64-bun.tar.gz` (Bun), each holding the binary and this README, plus
 `SHA256SUMS`. A tag that doesn't match
 `package.json` fails the run. Running the workflow by hand from the Actions tab builds and tests
 without releasing, and keeps the binary as a workflow artifact. To install a release:

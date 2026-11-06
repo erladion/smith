@@ -65,31 +65,47 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Build the binary
+      # Two builds of the same app: with Node (the default) and with Bun,
+      # whose runtime doesn't need libatomic.
+      - name: Build the binaries
         env:
           AGENT_VERSION: ${{ steps.version.outputs.version }}
-        run: npm run build:binary
-
-      - name: Check that it runs on RHEL 9
         run: |
+          npm run build:binary
+          npm run build:binary:bun
+
+      - name: Check that they run on RHEL 9
+        run: |
+          # Node build: needs libatomic.
           docker run --rm -v "$PWD/build/agent:/usr/local/bin/agent:ro" registry.access.redhat.com/ubi9/ubi:latest \
             sh -c 'dnf install -y -q libatomic && agent --version'
+          # Bun build: must run on the minimal image with nothing installed.
+          docker run --rm -v "$PWD/build/agent-bun:/usr/local/bin/agent:ro" registry.access.redhat.com/ubi9/ubi-minimal:latest \
+            agent --version
 
       - name: Package
         run: |
           # tar.gz rather than tar.xz: RHEL 9 doesn't install xz by default.
-          name="agent-${{ steps.version.outputs.version }}-${{ matrix.target }}"
-          mkdir -p "dist/$name"
-          cp build/agent README.md "dist/$name/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          rm -r "dist/${name:?}"
-          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
-          ls -l dist
+          # Staged in release/, not dist/: dist/ is where `npm run build` puts compiled code.
+          # Each archive holds a folder with the binary (always named agent) and the README.
+          package() {
+            local binary=$1 name=$2
+            mkdir -p "release/$name"
+            cp "build/$binary" "release/$name/agent"
+            cp README.md "release/$name/"
+            tar -C release -czf "release/$name.tar.gz" "$name"
+            rm -r "release/${name:?}"
+            (cd release && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          }
+          base="agent-${{ steps.version.outputs.version }}-${{ matrix.target }}"
+          package agent "$base"
+          package agent-bun "$base-bun"
+          ls -l release
 
       - uses: actions/upload-artifact@v4
         with:
           name: agent-${{ matrix.target }}
-          path: dist/*
+          path: release/*
           if-no-files-found: error
 
   release:
@@ -102,36 +118,37 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: dist
+          path: release
           merge-multiple: true
 
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cat dist/*.sha256 > dist/SHA256SUMS
-          rm dist/*.sha256
+          cat release/*.sha256 > release/SHA256SUMS
+          rm release/*.sha256
           cat > notes.md <<'EOF'
           ## Install
 
-          Download the `.tar.gz` for your machine and `SHA256SUMS`, then:
+          There are two builds of the same agent. Pick one:
+
+          | Archive | Runtime inside | Needs on RHEL 9 |
+          |---|---|---|
+          | `agent-<version>-linux-x64.tar.gz` | Node.js | `libatomic` (`sudo dnf install libatomic`) |
+          | `agent-<version>-linux-x64-bun.tar.gz` | Bun | nothing beyond glibc |
+
+          Download the archive and `SHA256SUMS`, then:
 
           ```sh
           sha256sum --check --ignore-missing SHA256SUMS
-          tar -xzf agent-*-linux-x64.tar.gz
-          sudo install agent-*-linux-x64/agent /usr/local/bin/
+          tar -xzf agent-*-linux-x64*.tar.gz
+          sudo install agent-*-linux-x64*/agent /usr/local/bin/
           ```
 
-          The binary contains its own Node.js. On RHEL 9 it needs two system packages:
-
-          ```sh
-          sudo dnf install libatomic bubblewrap
-          ```
-
-          `libatomic` is required (the binary won't start without it); `bubblewrap` runs shell
-          commands in a sandbox and is strongly recommended.
+          Either way, install `bubblewrap` (`sudo dnf install bubblewrap`) so shell commands run in
+          a sandbox; it's strongly recommended.
           EOF
-          gh release create "$GITHUB_REF_NAME" dist/* \
+          gh release create "$GITHUB_REF_NAME" release/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --notes-file notes.md \
