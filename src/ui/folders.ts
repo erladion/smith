@@ -29,6 +29,19 @@ export function tildify(p: string): string {
   return p === home ? "~" : p.startsWith(home + path.sep) ? `~${p.slice(home.length)}` : p;
 }
 
+/**
+ * A path shortened to `max` characters by dropping folders from the left, so
+ * the end (the project's own folder) stays visible: "…/work/webapp".
+ */
+export function shortPath(p: string, max: number): string {
+  const shown = tildify(p);
+  if (shown.length <= max) return shown;
+  const parts = shown.split("/");
+  let tail = parts.pop() ?? "";
+  while (parts.length > 0 && tail.length + parts[parts.length - 1]!.length + 3 <= max) tail = `${parts.pop()}/${tail}`;
+  return tail.length + 2 <= max ? `…/${tail}` : `…${tail.slice(tail.length - max + 1)}`;
+}
+
 function isDirectory(p: string): boolean {
   try {
     return fs.statSync(p).isDirectory();

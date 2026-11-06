@@ -18,7 +18,7 @@ import { type Key, KeyReader } from "./keys.js";
 import { markdownLines, safeSplit } from "./markdown.js";
 import { Picker } from "./picker.js";
 import { InlineRenderer } from "./renderer.js";
-import { isGitRepo, listFolders, tildify } from "./folders.js";
+import { isGitRepo, listFolders, shortPath, tildify } from "./folders.js";
 import { formatDuration, turnSummary } from "./duration.js";
 import { greeting } from "./greetings.js";
 import { historyToEntries } from "./replay.js";
@@ -39,10 +39,14 @@ export interface PreferenceUpdate {
 /** Lets the UI list, open and start sessions; the CLI owns which one is recorded to. */
 export interface SessionControl {
   currentId(): string;
-  /** This folder's sessions, newest first. */
-  list(): SessionInfo[];
-  /** Makes `id` the session being recorded and returns its conversation and last model. */
-  open(id: string): { messages: Message[]; model: string; endpoint?: string };
+  /** The name given with /name, if any. */
+  currentName(): string | undefined;
+  /** This folder's sessions (or every folder's), newest first. */
+  list(everywhere?: boolean): SessionInfo[];
+  /** Makes `id` the session being recorded and returns its conversation, folder and last model. */
+  open(id: string): { messages: Message[]; model: string; endpoint?: string; cwd: string };
+  /** Names the current session. */
+  rename(name: string): void;
   /** Starts recording to a new session (its file appears with the first message). */
   startNew(model: string, endpoint: string | undefined): void;
   /** Folders with saved sessions, most recently used first. */
@@ -101,7 +105,8 @@ const HELP = `Commands:
   /endpoint [name]    pick a configured endpoint, or switch to one by name
   /model [name]       pick a model from the server, or switch to one by name
   /reasoning [level]  pick how much the model thinks: ${REASONING_LEVELS.join(", ")}
-  /sessions           switch to another session from this folder
+  /sessions [all]     switch to another session from this folder (all: from every folder)
+  /name [name]        show or set the current session's name
   /open               pick a project folder: a recent one, or browse to one
   /new [folder]       start a new session, here or in another folder (/clear does the same)
   /undo               undo the last turn: restore files it changed and edit your message again
@@ -197,7 +202,9 @@ export class TuiApp {
       model: this.agent.model,
       server: this.server.label,
       cwd: this.project.cwd,
-      session: this.opts.sessions.currentId(),
+      session: this.opts.sessions.currentName()
+        ? `${this.opts.sessions.currentName()} · ${this.opts.sessions.currentId()}`
+        : this.opts.sessions.currentId(),
       resumed,
       sandbox: { active: sandbox.active, description: sandbox.describe() },
       instructions: this.project.instructions,
@@ -533,7 +540,9 @@ export class TuiApp {
           return this.newSession(arg);
         case "/sessions":
         case "/resume":
-          return this.openSessionPicker();
+          return this.openSessionPicker(arg === "all");
+        case "/name":
+          return this.nameSession(arg);
         case "/open":
           return this.openProjectPicker();
         case "/network":
@@ -615,21 +624,9 @@ export class TuiApp {
     const previous = this.opts.sessions.currentId();
     const notes: Entry[] = [];
     if (folder) {
-      let next: ProjectView;
-      try {
-        next = this.opts.switchProject(folder);
-      } catch (err) {
-        return this.print({ kind: "notice", level: "error", text: (err as Error).message });
-      }
-      // A fresh agent for the new folder (its prompt, instructions, skills and
-      // permissions), keeping the server, model and reasoning level.
-      const current = { client: this.server.client, model: this.agent.model, reasoning: this.agent.reasoning, contextSize: this.agent.contextLimit };
-      this.project = next;
-      this.agent = this.opts.createAgent(this.hooks, current);
-      notes.push(...next.warnings.map((text): Entry => ({ kind: "notice", level: "warn", text })));
-      if (next.cwd === os.homedir() || next.cwd === "/") {
-        notes.push({ kind: "notice", level: "warn", text: `The project is now ${next.cwd}: the agent can change anything under it.` });
-      }
+      const entered = this.enterProject(folder);
+      if (!entered) return;
+      notes.push(...entered);
     } else {
       this.agent.loadConversation([]);
     }
@@ -637,6 +634,39 @@ export class TuiApp {
     const where = folder ? ` in ${tildify(this.project.cwd)}` : "";
     notes.unshift({ kind: "notice", level: "info", text: `Started a new session${where}. The previous one is ${previous}; /sessions lists this folder's sessions.` });
     this.startOver(false, notes);
+  }
+
+  /**
+   * Makes `folder` the project: a fresh agent for it (its prompt, instructions,
+   * skills and permissions), keeping the server, model and reasoning level.
+   * Returns notes to show, or null (after printing why) if it isn't a folder.
+   */
+  private enterProject(folder: string): Entry[] | null {
+    let next: ProjectView;
+    try {
+      next = this.opts.switchProject(folder);
+    } catch (err) {
+      this.print({ kind: "notice", level: "error", text: (err as Error).message });
+      return null;
+    }
+    const current = { client: this.server.client, model: this.agent.model, reasoning: this.agent.reasoning, contextSize: this.agent.contextLimit };
+    this.project = next;
+    this.agent = this.opts.createAgent(this.hooks, current);
+    const notes = next.warnings.map((text): Entry => ({ kind: "notice", level: "warn", text }));
+    if (next.cwd === os.homedir() || next.cwd === "/") {
+      notes.push({ kind: "notice", level: "warn", text: `The project is now ${next.cwd}: the agent can change anything under it.` });
+    }
+    return notes;
+  }
+
+  private nameSession(name: string): void {
+    if (!name) {
+      const current = this.opts.sessions.currentName();
+      return this.print({ kind: "notice", level: "info", text: current ? `This session is named "${current}". /name <new name> renames it.` : "This session has no name yet. /name <name> gives it one; until then, listings use its first message." });
+    }
+    this.opts.sessions.rename(name);
+    const resume = /\s/.test(name) ? `agent --resume "${name}"` : `agent --resume ${name}`;
+    this.print({ kind: "notice", level: "info", text: `Named this session "${name}". Resume it from anywhere with: ${resume}` });
   }
 
   /** /open: recent project folders, and a way into the folder browser. */
@@ -678,21 +708,43 @@ export class TuiApp {
     };
   }
 
-  private openSessionPicker(): void {
+  /** Folders of the sessions listed in the open picker, to move there when one is chosen. */
+  private sessionFolders = new Map<string, string>();
+
+  private openSessionPicker(everywhere: boolean): void {
     const current = this.opts.sessions.currentId();
-    const sessions = this.opts.sessions.list();
+    const sessions = this.opts.sessions.list(everywhere);
     if (sessions.length === 0 || (sessions.length === 1 && sessions[0]!.id === current)) {
-      return this.print({ kind: "notice", level: "info", text: "There are no other saved sessions for this folder." });
+      const where = everywhere ? "" : " for this folder; /sessions all shows every folder's";
+      return this.print({ kind: "notice", level: "info", text: `There are no other saved sessions${where}.` });
     }
+    this.sessionFolders = new Map(sessions.map((s) => [s.id, s.cwd]));
     const items = sessions.map((s) => ({
       value: s.id,
-      label: s.preview || "(no messages)",
-      hint: `${ago(s.updated)} · ${s.turns} message${s.turns === 1 ? "" : "s"} · ${s.endpoint ? `${s.endpoint}/` : ""}${s.model}`,
+      label: s.name,
+      hint: [
+        everywhere && shortPath(s.cwd, 32),
+        ago(s.updated),
+        `${s.turns} message${s.turns === 1 ? "" : "s"}`,
+        `${s.endpoint ? `${s.endpoint}/` : ""}${s.model}`,
+      ].filter(Boolean).join(" · "),
     }));
-    this.picker = { kind: "session", picker: new Picker("Switch session", items, current) };
+    const title = everywhere ? "Switch session (all folders)" : "Switch session (this folder; /sessions all for every folder)";
+    this.picker = { kind: "session", picker: new Picker(title, items, current) };
   }
 
   private async switchSession(id: string): Promise<void> {
+    // A session from another folder: work there, as when it was recorded.
+    const folder = this.sessionFolders.get(id);
+    let notes: Entry[] = [];
+    if (folder && folder !== this.project.cwd) {
+      if (!fs.existsSync(folder)) {
+        return this.print({ kind: "notice", level: "error", text: `That session's folder, ${folder}, doesn't exist anymore.` });
+      }
+      const entered = this.enterProject(folder);
+      if (!entered) return;
+      notes = [{ kind: "notice", level: "info", text: `Now working in ${tildify(folder)}.` }, ...entered];
+    }
     let opened: ReturnType<SessionControl["open"]>;
     try {
       opened = this.opts.sessions.open(id);
@@ -700,7 +752,7 @@ export class TuiApp {
       return this.print({ kind: "notice", level: "error", text: `Could not open session ${id}: ${(err as Error).message}` });
     }
     this.agent.loadConversation(opened.messages);
-    this.startOver(true, historyToEntries(opened.messages, this.project.tools));
+    this.startOver(true, [...notes, ...historyToEntries(opened.messages, this.project.tools)]);
 
     // Continue on the endpoint and model the session last used, when they're available.
     const { endpoint, model } = opened;

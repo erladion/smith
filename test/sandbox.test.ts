@@ -146,12 +146,12 @@ describe("sandbox fallbacks", () => {
     }
   });
 
-  test("on fails clearly when bwrap is missing", () => {
+  test("the sandbox is required: without bwrap the agent refuses to start", () => {
     const path = process.env.PATH;
     process.env.PATH = "/nonexistent";
     try {
-      assert.throws(() => Sandbox.create("on", false), /bubblewrap.*not installed[\s\S]*dnf install bubblewrap/);
-      assert.equal(Sandbox.create("auto", false).active, false);
+      assert.throws(() => Sandbox.create("on", false), /bubblewrap.*not installed[\s\S]*dnf install bubblewrap[\s\S]*--sandbox off/);
+      assert.equal(Sandbox.create("off", false).active, false, "only an explicit off runs unsandboxed");
     } finally {
       process.env.PATH = path;
     }

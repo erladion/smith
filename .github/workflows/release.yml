@@ -158,8 +158,8 @@ jobs:
           sudo install agent-*-linux-x64*/agent /usr/local/bin/
           ```
 
-          Either way, install `bubblewrap` (`sudo dnf install bubblewrap`) so shell commands run in
-          a sandbox; it's strongly recommended.
+          Either way, install `bubblewrap` (`sudo dnf install bubblewrap`): shell commands run in
+          a sandbox, and the agent won't start without it unless you pass `--sandbox off`.
           EOF
           gh release create "$GITHUB_REF_NAME" release/* \
             --repo "$GITHUB_REPOSITORY" \

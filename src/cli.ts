@@ -13,7 +13,7 @@ import { buildSubagentPrompt, buildSystemPrompt } from "./core/prompt.js";
 import { isReasoningLevel, REASONING_LEVELS, type ReasoningLevel } from "./core/reasoning.js";
 import { Sandbox, type SandboxMode } from "./core/sandbox.js";
 import { Server } from "./core/server.js";
-import { listSessions, Session } from "./core/session.js";
+import { findSession, listSessions, secureSessions, Session } from "./core/session.js";
 import { loadSkills, type Skill, skillRoots } from "./core/skills.js";
 import type { ToolDef } from "./core/tool.js";
 import { fastTools } from "./core/toolchain.js";
@@ -21,6 +21,7 @@ import { defaultTools } from "./core/tools/index.js";
 import { createSkillTool } from "./core/tools/skill.js";
 import { type AgentHooks, type AgentSettings, type ProjectView, TuiApp } from "./ui/app.js";
 import { turnSummary } from "./ui/duration.js";
+import { shortPath } from "./ui/folders.js";
 import { FAREWELL } from "./ui/greetings.js";
 import { describeError } from "./core/errors.js";
 import { useSystemNetworkSettings } from "./core/network.js";
@@ -44,13 +45,14 @@ Server:
   --max-steps <n>        Model calls allowed per message (default: maxSteps in the config file, else 50)
 
 Sandbox (shell commands run in bubblewrap):
-  --sandbox <mode>       auto | on | off (default auto: use bwrap if it works, else warn)
+  --sandbox <mode>       on | off (default on: the agent won't start if bubblewrap can't run;
+                         off runs commands unsandboxed and must be asked for explicitly)
   --network              Allow sandboxed commands to use the network (default: blocked)
 
 Sessions:
   -c, --continue         Resume the most recent session in this directory
-  -r, --resume <id>      Resume a session by id
-  --sessions             List saved sessions for this directory
+  -r, --resume <id|name> Resume a session by id or name (in the folder it was in)
+  --sessions             List saved sessions from every folder (agent <folder> --sessions: only that one)
 
 One-shot:
   -p, --print <prompt>   Run one prompt without the TUI and print the answer
@@ -63,6 +65,7 @@ Endpoints are configured in ~/.config/agent/config.json; run --endpoints for an 
 
 async function main(): Promise<void> {
   useSystemNetworkSettings();
+  secureSessions();
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
@@ -98,13 +101,13 @@ async function main(): Promise<void> {
   if (positionals.length > 1) throw new Error("Give at most one folder to work in.");
   if (positionals[0]) process.chdir(resolveFolder(positionals[0], process.cwd()));
   if (values.sessions) {
-    printSessions(process.cwd());
+    printSessions(positionals[0] ? process.cwd() : undefined);
     return;
   }
   // Resume first: a resumed session suggests which model to use, and where to work.
   let resumed: { session: Session; messages: Message[] } | null = null;
   if (values.resume) {
-    resumed = Session.open(values.resume);
+    resumed = Session.open(findSession(values.resume));
     // Work where the session happened, unless a folder was given.
     if (!positionals[0] && fs.existsSync(resumed.session.cwd)) process.chdir(resumed.session.cwd);
   } else if (values.continue) {
@@ -133,8 +136,8 @@ async function main(): Promise<void> {
     (await server.chooseModel([resumed?.session.model, prefs.models?.[server.baseURL]]));
   const contextSize = parseNumber(values["context-size"], "--context-size") ?? (await server.contextSize(model));
 
-  const sandboxMode = values.sandbox ?? "auto";
-  if (!["auto", "on", "off"].includes(sandboxMode)) throw new Error("--sandbox must be auto, on or off");
+  const sandboxMode = values.sandbox ?? "on";
+  if (!["on", "off"].includes(sandboxMode)) throw new Error("--sandbox must be on or off");
   const sandbox = Sandbox.create(sandboxMode as SandboxMode, values.network ?? false);
 
   // The project being worked in; /new <folder> in the TUI switches it.
@@ -199,12 +202,14 @@ async function main(): Promise<void> {
     sandbox,
     sessions: {
       currentId: () => session.id,
-      list: () => listSessions(project.cwd, 50),
+      currentName: () => session.name,
+      list: (everywhere) => listSessions(everywhere ? undefined : project.cwd, 50),
       open: (id) => {
         const opened = Session.open(id);
         session = opened.session;
-        return { messages: opened.messages, model: session.model, endpoint: session.endpoint };
+        return { messages: opened.messages, model: session.model, endpoint: session.endpoint, cwd: session.cwd };
       },
+      rename: (name) => session.rename(name),
       startNew: (model, endpoint) => {
         session = Session.create(project.cwd, model, endpoint);
       },
@@ -228,7 +233,8 @@ async function main(): Promise<void> {
       });
     },
   }).run();
-  console.log(`${FAREWELL}\nSession ${session.id}. Resume with: agent --resume ${session.id}`);
+  const resumeWith = session.name && !/\s/.test(session.name) ? session.name : session.id;
+  console.log(`${FAREWELL}\nSession ${session.name ? `"${session.name}" ` : ""}${session.id}. Resume with: agent --resume ${resumeWith}`);
 }
 
 interface Project {
@@ -334,17 +340,27 @@ function printEndpoints(config: Config): void {
   for (const warning of config.warnings) console.log(`\nwarning: ${warning}`);
 }
 
-function printSessions(cwd: string): void {
+/** Every saved session (or one folder's): name, where it is, when, how long, which model. */
+function printSessions(cwd: string | undefined): void {
   const sessions = listSessions(cwd);
   if (sessions.length === 0) {
-    console.log("No saved sessions for this directory.");
+    console.log(cwd ? "No saved sessions for this folder." : "No saved sessions yet.");
     return;
   }
-  for (const s of sessions) {
-    const when = s.updated.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
-    const where = s.endpoint ? `${s.endpoint}/${s.model}` : s.model;
-    console.log(`${s.id}  ${when.padEnd(17)}  ${where.padEnd(32).slice(0, 32)}  ${s.preview}`);
-  }
+  const rows = sessions.map((s) => [
+    s.name,
+    shortPath(s.cwd, 40),
+    s.updated.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" }),
+    String(s.turns),
+    s.endpoint ? `${s.endpoint}/${s.model}` : s.model,
+    s.id,
+  ]);
+  const header = ["NAME", "FOLDER", "LAST USED", "MSGS", "MODEL", "ID"];
+  const widths = header.map((h, i) => Math.min(i < 2 ? 48 : 40, Math.max(h.length, ...rows.map((r) => r[i]!.length))));
+  const fit = (cells: string[]) => cells.map((c, i) => (c.length > widths[i]! ? `${c.slice(0, widths[i]! - 1)}…` : c.padEnd(widths[i]!))).join("  ").trimEnd();
+  console.log(fit(header));
+  for (const row of rows) console.log(fit(row));
+  console.log(`\n${sessions.length} session${sessions.length === 1 ? "" : "s"}. Resume one with: agent --resume <id or name>`);
 }
 
 async function runHeadless(

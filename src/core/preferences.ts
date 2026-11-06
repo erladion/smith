@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { privateDir, privateFile } from "./private.js";
 import { isReasoningLevel, type ReasoningLevel } from "./reasoning.js";
 
 /** Choices remembered between runs. Models are per server, since each serves its own set. */
@@ -39,8 +40,9 @@ export function savePreferences(update: {
   if (update.endpoint) prefs.endpoint = update.endpoint;
   if (update.model) prefs.models = { ...prefs.models, [update.model.baseURL]: update.model.id };
   try {
-    fs.mkdirSync(path.dirname(file()), { recursive: true });
-    fs.writeFileSync(file(), JSON.stringify(prefs, null, 2) + "\n");
+    privateDir(path.dirname(file()));
+    fs.writeFileSync(file(), JSON.stringify(prefs, null, 2) + "\n", { mode: 0o600 });
+    privateFile(file());
   } catch {
     // Preferences are a convenience; failing to save them shouldn't break anything.
   }

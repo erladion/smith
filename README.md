@@ -7,7 +7,7 @@ A small agentic coding harness with a terminal UI. It talks to any OpenAI-compat
 
 - Node.js 22 or newer. On RHEL 9: `sudo dnf module install nodejs:22`
 - bash and grep (always present)
-- Recommended: `bubblewrap` for the shell sandbox (`sudo dnf install bubblewrap`, in RHEL 9 BaseOS)
+- `bubblewrap` for the shell sandbox, which is required (`sudo dnf install bubblewrap`)
 - Optional: `ripgrep` (EPEL) and `fd-find` for faster search; the agent falls back to grep and its own file walker
 
 The only npm runtime dependencies are `openai` and `zod`, neither of which has dependencies of its own. The terminal UI is written from scratch.
@@ -146,7 +146,8 @@ configured endpoint they weren't set for. The file is only read, never written.
 | `/undo` | undo the last turn: restore the files it changed and edit your message again |
 | `/skills` | list the available skills |
 | `/compact` | summarize the conversation now |
-| `/sessions` | switch to another session from this folder (type to search by first message) |
+| `/sessions [all]` | switch to another session from this folder, or from every folder with `all` (type to search by name) |
+| `/name [name]` | show or set the current session's name |
 | `/new [folder]` | start a new session, here or in another folder; `/clear` does the same, and the old one stays resumable |
 | `/open` | pick a project folder: a recent one, or browse (enter opens, backspace goes up, type to filter) |
 | `/help`, `/exit` | |
@@ -241,10 +242,23 @@ alone. Undo history lives in memory, so it doesn't survive a restart or a compac
 ## Sessions
 
 Every conversation is saved as an append-only JSONL log in `~/.local/share/agent/sessions/`.
-`--sessions` lists the ones for the current directory, `-c` resumes the latest, and
-`--resume <id>` resumes a specific one. In the TUI, `/sessions` switches between them and `/new`
-starts a fresh one. Resuming or switching replays the transcript and continues on the endpoint
-and model the session last used, when they're still available.
+Session files are readable by you only (600, folders 700); files from older versions are
+tightened the next time the agent starts.
+
+Each session has a name: the first line of your first message, until you give it one with
+`/name`. Naming a session saves it right away, even before its first message.
+
+```sh
+agent --sessions                 # every session from every folder: name, folder, last used, size, model, id
+agent ~/git/webapp --sessions    # only that folder's
+agent --resume login-fix         # by name or id, from anywhere: it goes back to the session's folder
+agent -c                         # the latest session in the current folder
+```
+
+In the TUI, `/sessions` switches between this folder's sessions, `/sessions all` between every
+folder's (moving to that folder), and `/new` starts a fresh one. Resuming or switching replays
+the transcript and continues on the endpoint and model the session last used, when they're still
+available.
 
 ## Context management
 
@@ -292,8 +306,9 @@ check, so a link in the project can't lead there.
 
 ### Shell sandbox
 
-`bash` commands run inside [bubblewrap](https://github.com/containers/bubblewrap) when it is
-installed (`--sandbox auto`, the default). Inside the sandbox:
+`bash` commands run inside [bubblewrap](https://github.com/containers/bubblewrap), and the
+sandbox is required: if bubblewrap isn't installed or can't run, the agent doesn't start.
+Inside the sandbox:
 
 - the filesystem is read-only except the project directory and a private, empty `/tmp`
 - credentials and shell history in your home directory (`~/.ssh`, `~/.aws`, `~/.docker`,
@@ -306,8 +321,9 @@ installed (`--sandbox auto`, the default). Inside the sandbox:
 - only a short allowlist of environment variables is passed in, so tokens don't leak
 - other processes are invisible, and everything is killed when the agent exits
 
-`--sandbox on` refuses to start without bubblewrap; `--sandbox off` disables it. The banner,
-status line and every approval prompt say whether commands are sandboxed.
+`--sandbox off` runs commands without it. That has to be asked for on every run, and is meant
+for places bubblewrap can't work, such as inside a container that already isolates the agent.
+The banner, status line and every approval prompt say whether commands are sandboxed.
 
 What the sandbox can't protect: anything in the project itself (scripts in `package.json`, a
 `Makefile`, `.envrc`) can still be changed and will run unsandboxed if you run it yourself

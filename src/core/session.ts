@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { SUMMARY_PREFIX } from "./context.js";
+import { privateDir, privateFile, privateTree } from "./private.js";
 import { type HistoryChange, type Message, messageText } from "./history.js";
 
 /**
@@ -12,6 +13,7 @@ import { type HistoryChange, type Message, messageText } from "./history.js";
  *   {"type":"append", "message": {...}}        one per message added
  *   {"type":"replace", "messages": [...]}      after compaction or /clear
  *   {"type":"model", "model", "endpoint"?}     when the user switches model or endpoint
+ *   {"type":"name", "name"}                    when the user names the session (/name)
  *
  * Replaying the log rebuilds the conversation (without the system prompt,
  * which is regenerated on resume). Appending instead of rewriting means a
@@ -19,10 +21,11 @@ import { type HistoryChange, type Message, messageText } from "./history.js";
  */
 
 type Line =
-  | { type: "meta"; id: string; cwd: string; model: string; endpoint?: string; created: string }
+  | { type: "meta"; id: string; cwd: string; model: string; endpoint?: string; name?: string; created: string }
   | { type: "append"; message: Message }
   | { type: "replace"; messages: Message[] }
-  | { type: "model"; model: string; endpoint?: string };
+  | { type: "model"; model: string; endpoint?: string }
+  | { type: "name"; name: string };
 
 export interface SessionInfo {
   id: string;
@@ -36,6 +39,10 @@ export interface SessionInfo {
   preview: string;
   /** Number of messages you sent. */
   turns: number;
+  /** The session's name: set with /name, or else taken from the first message. */
+  name: string;
+  /** Whether the name was set with /name. */
+  named: boolean;
 }
 
 export function sessionsDir(): string {
@@ -45,8 +52,11 @@ export function sessionsDir(): string {
 
 export class Session {
   private started = false;
+  /** Whether this run has checked the file's permissions (older versions created it readable by others). */
+  private secured = false;
   private currentModel: string;
   private currentEndpoint: string | undefined;
+  private currentName: string | undefined;
 
   private constructor(
     readonly id: string,
@@ -55,6 +65,7 @@ export class Session {
   ) {
     this.currentModel = meta.model;
     this.currentEndpoint = meta.endpoint;
+    this.currentName = meta.name;
   }
 
   /** The model in use when the session was last saved. */
@@ -91,16 +102,32 @@ export class Session {
   static open(id: string): { session: Session; messages: Message[] } {
     const file = path.join(sessionsDir(), `${id}.jsonl`);
     if (!fs.existsSync(file)) throw new Error(`No session ${id} in ${sessionsDir()}`);
-    const { meta, messages, model, endpoint } = readLog(file);
+    const { meta, messages, model, endpoint, name } = readLog(file);
     const session = new Session(meta.id, file, meta);
     session.currentModel = model;
     session.currentEndpoint = endpoint;
+    session.currentName = name;
     session.started = true;
     return { session, messages };
   }
 
   record(change: HistoryChange): void {
     this.write(change.type === "append" ? { type: "append", message: change.message } : change);
+  }
+
+  /** The name given with /name, if any. */
+  get name(): string | undefined {
+    return this.currentName;
+  }
+
+  /**
+   * Names the session; listings and --resume <name> use it. Unlike other
+   * changes this saves the session even before its first message: naming it
+   * means you want to come back to it.
+   */
+  rename(name: string): void {
+    this.currentName = name;
+    this.write({ type: "name", name });
   }
 
   recordModel(model: string, endpoint: string | undefined): void {
@@ -115,13 +142,25 @@ export class Session {
   private write(line: Line): void {
     const lines: Line[] = [];
     if (!this.started) {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true });
+      privateDir(path.dirname(path.dirname(this.file)));
+      privateDir(path.dirname(this.file));
       lines.push(this.meta);
       this.started = true;
     }
     lines.push(line);
-    fs.appendFileSync(this.file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+    // Sessions contain whole conversations: readable by you only.
+    fs.appendFileSync(this.file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n", { mode: 0o600 });
+    if (!this.secured) {
+      privateFile(this.file);
+      this.secured = true;
+    }
   }
+}
+
+/** Makes existing session files private; files from older versions were readable by others. */
+export function secureSessions(): void {
+  privateTree(path.dirname(sessionsDir()), /^$/);
+  privateTree(sessionsDir(), /\.jsonl$/);
 }
 
 /**
@@ -145,15 +184,41 @@ export function listSessions(cwd?: string, limit = Infinity): SessionInfo[] {
   for (const { file, updated } of files) {
     if (infos.length >= limit) break;
     try {
-      const { meta, messages, model, endpoint } = readLog(file);
+      const { meta, messages, model, endpoint, name } = readLog(file);
       if (cwd && meta.cwd !== cwd) continue;
       const users = messages.filter((m) => m.role === "user").map(messageText);
-      infos.push({ ...meta, model, endpoint, file, updated, preview: preview(users[0] ?? ""), turns: users.length });
+      const first = preview(users[0] ?? "");
+      infos.push({ ...meta, model, endpoint, file, updated, preview: first, turns: users.length, named: name !== undefined, name: name ?? defaultName(first) });
     } catch {
       // Unreadable or foreign file; skip it.
     }
   }
   return infos;
+}
+
+/** A name from the first message, until the session is given one with /name: its first line, shortened. */
+export function defaultName(firstMessage: string): string {
+  const line = firstMessage.split(/(?<=[.!?])\s/)[0] ?? "";
+  if (line.length <= 48) return line || "(no messages)";
+  // Cut at 47 characters, dropping a word only if the cut splits it.
+  let cut = line.slice(0, 47);
+  if (!/\s/.test(line[47]!)) cut = cut.replace(/\s+\S*$/, "");
+  return `${cut.trimEnd()}…`;
+}
+
+/**
+ * Finds a session by id, or by name (ignoring case) when no id matches.
+ * Throws with the candidates when a name is ambiguous.
+ */
+export function findSession(idOrName: string): string {
+  if (fs.existsSync(path.join(sessionsDir(), `${idOrName}.jsonl`))) return idOrName;
+  const wanted = idOrName.toLowerCase();
+  const matches = listSessions().filter((s) => s.name.toLowerCase() === wanted);
+  if (matches.length === 1) return matches[0]!.id;
+  if (matches.length > 1) {
+    throw new Error(`Several sessions are named "${idOrName}"; resume one by id:\n${matches.map((s) => `  ${s.id}  ${s.cwd}`).join("\n")}`);
+  }
+  throw new Error(`No session with the id or name "${idOrName}". agent --sessions lists them.`);
 }
 
 /** One line from a session's first message; after compaction, the message following the summary. */
@@ -171,12 +236,14 @@ function readLog(file: string): {
   messages: Message[];
   model: string;
   endpoint: string | undefined;
+  name: string | undefined;
 } {
   const raw = fs.readFileSync(file, "utf8").split("\n");
   let meta: Extract<Line, { type: "meta" }> | undefined;
   let messages: Message[] = [];
   let model: string | undefined;
   let endpoint: string | undefined;
+  let name: string | undefined;
   for (const [i, text] of raw.entries()) {
     if (!text.trim()) continue;
     let line: Line;
@@ -190,8 +257,10 @@ function readLog(file: string): {
     if (line.type === "meta") meta = line;
     else if (line.type === "append") messages.push(line.message);
     else if (line.type === "replace") messages = [...line.messages];
+    else if (line.type === "name") name = line.name;
     else ({ model, endpoint } = line);
   }
   if (!meta) throw new Error(`Session log ${file} has no header`);
-  return model ? { meta, messages, model, endpoint } : { meta, messages, model: meta.model, endpoint: meta.endpoint };
+  name ??= meta.name;
+  return model ? { meta, messages, model, endpoint, name } : { meta, messages, model: meta.model, endpoint: meta.endpoint, name };
 }

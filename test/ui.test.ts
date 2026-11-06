@@ -6,7 +6,7 @@ import { greeting } from "../src/ui/greetings.js";
 import { KeyReader } from "../src/ui/keys.js";
 import { inline, markdownLines, safeSplit } from "../src/ui/markdown.js";
 import { Picker } from "../src/ui/picker.js";
-import { isGitRepo, listFolders } from "../src/ui/folders.js";
+import { isGitRepo, listFolders, shortPath } from "../src/ui/folders.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -271,4 +271,11 @@ test("durations and turn summaries", async () => {
   assert.equal(turnSummary("interrupted", 12_000, 2), "Interrupted after 12s · 2 tool calls");
   assert.equal(turnSummary("max_steps", 600_000, 50), "Stopped at the step limit after 10m 00s · 50 tool calls");
   assert.equal(turnSummary(undefined, 3_000, 0), "Stopped after 3.0s");
+});
+
+test("long folder paths keep their end", () => {
+  assert.equal(shortPath("/srv/projects/work/webapp", 40), "/srv/projects/work/webapp");
+  assert.equal(shortPath("/very/long/path/to/some/deep/folder/work/webapp", 20), "…/folder/work/webapp");
+  assert.equal(shortPath(`${os.homedir()}/git/agent`, 40), "~/git/agent");
+  assert.equal(shortPath("/x/an-extremely-long-folder-name-that-does-not-fit", 12), "…oes-not-fit", "a single name too long to fit keeps its end");
 });

@@ -22,7 +22,7 @@ import path from "node:path";
  * Only flags available in bubblewrap 0.4 are used, the version RHEL 9 ships.
  */
 
-export type SandboxMode = "auto" | "on" | "off";
+export type SandboxMode = "on" | "off";
 
 const ENV_ALLOW =
   /^(PATH|HOME|USER|LOGNAME|SHELL|TERM|TZ|LANG|LANGUAGE|LC_[A-Z_]+|COLORTERM|NO_COLOR|FORCE_COLOR|CI|EDITOR|JAVA_HOME|GOPATH|GOROOT|CARGO_HOME|RUSTUP_HOME|VIRTUAL_ENV|CONDA_PREFIX|PYTHONPATH|NODE_PATH|GEM_HOME|GEM_PATH)$/;
@@ -109,17 +109,20 @@ export class Sandbox {
   }
 
   /**
-   * "auto" uses bwrap when it works and otherwise runs unsandboxed with a
-   * warning; "on" refuses to start without it; "off" never sandboxes.
+   * "on" (the default) requires the sandbox: if bwrap can't run, the agent
+   * doesn't start. "off" never sandboxes; it has to be asked for explicitly.
    */
   static create(mode: SandboxMode, network: boolean): Sandbox {
     if (mode === "off") return Sandbox.none("disabled with --sandbox off");
     const problem = probeBwrap();
-    if (!problem) return new Sandbox(true, network);
-    if (mode === "on") {
-      throw new Error(`--sandbox on, but bubblewrap can't run: ${problem}\nOn RHEL/Fedora: sudo dnf install bubblewrap`);
+    if (problem) {
+      throw new Error(
+        `Shell commands run in a sandbox, but bubblewrap can't run: ${problem}\n` +
+          "On RHEL/Fedora: sudo dnf install bubblewrap\n" +
+          "To run without a sandbox anyway (e.g. inside a container that already isolates it), pass --sandbox off.",
+      );
     }
-    return Sandbox.none(problem);
+    return new Sandbox(true, network);
   }
 
   describe(): string {

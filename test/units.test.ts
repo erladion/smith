@@ -7,7 +7,8 @@ import OpenAI from "openai";
 import { chooseTail, SUMMARY_PREFIX, trimOldToolResults } from "../src/core/context.js";
 import { describeError } from "../src/core/errors.js";
 import type { Message } from "../src/core/history.js";
-import { listSessions, Session } from "../src/core/session.js";
+import { defaultName, findSession, listSessions, secureSessions, Session, sessionsDir } from "../src/core/session.js";
+import { loadPreferences, savePreferences } from "../src/core/preferences.js";
 import { ThinkTagParser } from "../src/core/think.js";
 
 describe("ThinkTagParser", () => {
@@ -68,6 +69,73 @@ describe("sessions", () => {
   after(() => {
     process.env.XDG_DATA_HOME = original;
     fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  const mode = (p: string) => (fs.statSync(p).mode & 0o777).toString(8);
+
+  test("session files and folders are private; old readable ones get tightened", () => {
+    const session = Session.create("/private", "m");
+    session.record({ type: "append", message: { role: "user", content: "secret stuff" } });
+    assert.equal(mode(session.file), "600");
+    assert.equal(mode(sessionsDir()), "700");
+    assert.equal(mode(path.dirname(sessionsDir())), "700");
+
+    // As an older version left them:
+    fs.chmodSync(session.file, 0o644);
+    fs.chmodSync(sessionsDir(), 0o755);
+    secureSessions();
+    assert.equal(mode(session.file), "600");
+    assert.equal(mode(sessionsDir()), "700");
+
+    // Reopening and writing also fixes a file's permissions.
+    fs.chmodSync(session.file, 0o644);
+    Session.open(session.id).session.record({ type: "append", message: { role: "assistant", content: "ok" } });
+    assert.equal(mode(session.file), "600");
+  });
+
+  test("preferences are private", () => {
+    const originalConfig = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(dataDir, "config");
+    try {
+      savePreferences({ reasoning: "high" });
+      assert.equal(loadPreferences().reasoning, "high");
+      assert.equal(mode(path.join(dataDir, "config", "agent", "preferences.json")), "600");
+      assert.equal(mode(path.join(dataDir, "config", "agent")), "700");
+      assert.equal(mode(path.join(dataDir, "config")), "755", "only the agent's own folder is made private");
+    } finally {
+      process.env.XDG_CONFIG_HOME = originalConfig;
+    }
+  });
+
+  test("sessions have names: from the first message, or set with /name", () => {
+    assert.equal(defaultName("Fix the login bug. Also the tests."), "Fix the login bug.");
+    assert.equal(defaultName("Please refactor the whole authentication module so that it uses the new token service"), "Please refactor the whole authentication module…");
+
+    const early = Session.create("/names/a", "m");
+    early.rename("auth-rework"); // named before the first message
+    early.record({ type: "append", message: { role: "user", content: "Rework auth" } });
+    const late = Session.create("/names/b", "m");
+    late.record({ type: "append", message: { role: "user", content: "Add a version flag. Thanks" } });
+    late.rename("version flag");
+    const unnamed = Session.create("/names/c", "m");
+    unnamed.record({ type: "append", message: { role: "user", content: "Look into the flaky test" } });
+
+    const byId = new Map(listSessions().map((s) => [s.id, s]));
+    assert.deepEqual([early, late, unnamed].map((s) => [byId.get(s.id)!.name, byId.get(s.id)!.named]), [
+      ["auth-rework", true],
+      ["version flag", true],
+      ["Look into the flaky test", false],
+    ]);
+    assert.equal(Session.open(late.id).session.name, "version flag");
+
+    assert.equal(findSession("AUTH-rework"), early.id, "names match ignoring case");
+    assert.equal(findSession(late.id), late.id);
+    Session.create("/names/d", "m").rename("auth-rework");
+    const twin = Session.create("/names/e", "m");
+    twin.rename("auth-rework");
+    twin.record({ type: "append", message: { role: "user", content: "x" } });
+    assert.throws(() => findSession("auth-rework"), /Several sessions are named "auth-rework"/);
+    assert.throws(() => findSession("nope"), /No session with the id or name "nope"/);
   });
 
   test("records, replaces and reloads a conversation", () => {
