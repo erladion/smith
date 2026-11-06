@@ -4,8 +4,8 @@ import path from "node:path";
 
 const MAX_FOLDERS = 500;
 
-/** Subfolders of `dir`, by name, case-insensitively sorted; hidden ones (".name") left out. */
-export function listFolders(dir: string): { names: string[]; error?: string } {
+/** Subfolders of `dir`, by name, case-insensitively sorted; hidden ones (".name") only if asked for. */
+export function listFolders(dir: string, includeHidden = false): { names: string[]; error?: string } {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -13,7 +13,7 @@ export function listFolders(dir: string): { names: string[]; error?: string } {
     return { names: [], error: (err as NodeJS.ErrnoException).code === "EACCES" ? "no permission to list this folder" : (err as Error).message };
   }
   const names = entries
-    .filter((e) => !e.name.startsWith(".") && (e.isDirectory() || (e.isSymbolicLink() && isDirectory(path.join(dir, e.name)))))
+    .filter((e) => (includeHidden || !e.name.startsWith(".")) && (e.isDirectory() || (e.isSymbolicLink() && isDirectory(path.join(dir, e.name)))))
     .map((e) => e.name)
     .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
   return { names: names.slice(0, MAX_FOLDERS) };

@@ -137,6 +137,11 @@ configured endpoint they weren't set for. The file is only read, never written.
 
 ## In the TUI
 
+Type `/` and the commands appear under the input; each letter narrows the list (`/h` leaves
+`/help`). ↑/↓ pick one, Tab completes it, Enter runs it, Esc hides the list. After a command and a
+space, its argument completes too: reasoning levels, `on`/`off`, `all`, endpoint and model names,
+and folders for `/new`.
+
 | Command | |
 |---|---|
 | `/endpoint [name]` | pick a configured endpoint, or switch by name |

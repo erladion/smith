@@ -279,3 +279,48 @@ test("long folder paths keep their end", () => {
   assert.equal(shortPath(`${os.homedir()}/git/agent`, 40), "~/git/agent");
   assert.equal(shortPath("/x/an-extremely-long-folder-name-that-does-not-fit", 12), "…oes-not-fit", "a single name too long to fit keeps its end");
 });
+
+describe("command suggestions", async () => {
+  const { suggest, helpText, COMMANDS } = await import("../src/ui/commands.js");
+  const ctx = { cwd: os.tmpdir(), endpoints: ["local", "gpu-box"], models: ["qwen3-coder-30b", "gpt-oss-20b"] };
+  const texts = (input: string, c = ctx) => suggest(input, c).map((s) => s.text);
+
+  test("typing / lists every command, more letters narrow it down", () => {
+    assert.equal(texts("/").length, COMMANDS.length);
+    assert.deepEqual(texts("/h"), ["/help"]);
+    assert.deepEqual(texts("/n").slice(0, 3), ["/name", "/new", "/network"]);
+    assert.equal(texts("/net")[0], "/network");
+    assert.deepEqual(texts("/xyz"), []);
+  });
+
+  test("arguments complete after the command and a space", () => {
+    assert.deepEqual(texts("/reasoning "), ["/reasoning default", "/reasoning off", "/reasoning low", "/reasoning medium", "/reasoning high"]);
+    assert.deepEqual(texts("/reasoning h"), ["/reasoning high"]);
+    assert.deepEqual(texts("/network o"), ["/network on", "/network off"]);
+    assert.deepEqual(texts("/sessions "), ["/sessions all"]);
+    assert.deepEqual(texts("/endpoint g"), ["/endpoint gpu-box"]);
+    assert.deepEqual(texts("/model oss"), ["/model gpt-oss-20b"]);
+    assert.deepEqual(texts("/help "), [], "no arguments to complete");
+  });
+
+  test("/new completes folders, going deeper with each /", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-complete-"));
+    try {
+      for (const d of ["webapp/src", "web-old", "billing", ".hidden"]) fs.mkdirSync(path.join(dir, d), { recursive: true });
+      const at = { ...ctx, cwd: dir };
+      assert.deepEqual(texts("/new we", at), ["/new web-old/", "/new webapp/"]);
+      assert.deepEqual(texts("/new webapp/", at), ["/new webapp/src/"]);
+      assert.deepEqual(texts("/new .h", at), ["/new .hidden/"], "hidden folders when the name starts with a dot");
+      assert.equal(suggest("/new we", at)[0]!.takesArgument, true);
+      assert.ok(texts("/new ~/", at).every((t) => t.startsWith("/new ~/")));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("ordinary messages get no suggestions; help lists every command", () => {
+    assert.deepEqual(texts("fix the bug"), []);
+    assert.deepEqual(texts("/help\nmore"), []);
+    for (const c of COMMANDS) assert.match(helpText(), new RegExp(c.name.replace("/", "\\/")));
+  });
+});

@@ -21,6 +21,7 @@ import { InlineRenderer } from "./renderer.js";
 import { isGitRepo, listFolders, shortPath, tildify } from "./folders.js";
 import { formatDuration, turnSummary } from "./duration.js";
 import { greeting } from "./greetings.js";
+import { helpText, type Suggestion, suggest } from "./commands.js";
 import { historyToEntries } from "./replay.js";
 import type { Line } from "./style.js";
 import { prefixed, truncate, wrap } from "./text.js";
@@ -101,21 +102,7 @@ interface Terminal {
   output: NodeJS.WriteStream;
 }
 
-const HELP = `Commands:
-  /endpoint [name]    pick a configured endpoint, or switch to one by name
-  /model [name]       pick a model from the server, or switch to one by name
-  /reasoning [level]  pick how much the model thinks: ${REASONING_LEVELS.join(", ")}
-  /sessions [all]     switch to another session from this folder (all: from every folder)
-  /name [name]        show or set the current session's name
-  /open               pick a project folder: a recent one, or browse to one
-  /new [folder]       start a new session, here or in another folder (/clear does the same)
-  /undo               undo the last turn: restore files it changed and edit your message again
-  /skills             list the available skills
-  /network on|off     allow or block network access for sandboxed commands
-  /compact            summarize the conversation now to free context
-  /exit               quit
-Keys: enter sends · shift+enter, \\ then enter, or ctrl+j adds a new line · esc interrupts the agent
-      ↑/↓ recall earlier input · ctrl+c quits`;
+const HELP = helpText();
 
 /** "just now", "5 min ago", "3 h ago", "yesterday", or a date. */
 function ago(date: Date): string {
@@ -149,6 +136,11 @@ export class TuiApp {
   private context: { tokens: number; limit?: number } | null = null;
   /** The running turn: when it started, how many tools it ran, how it ended. */
   private turn: { started: number; toolCalls: number; reason?: string } | null = null;
+  /** The highlighted entry in the command suggestions, and input for which they were dismissed with esc. */
+  private suggestionIndex = 0;
+  private dismissedFor: string | null = null;
+  /** Model ids the server listed, for completing /model. */
+  private knownModels: string[] = [];
   /** Tools running right now (several when read-only tools run in parallel), by call id. */
   private readonly running = new Map<string, string>();
 
@@ -190,9 +182,20 @@ export class TuiApp {
     this.printBanner(this.opts.resumed.length > 0);
     for (const text of this.opts.warnings) this.print({ kind: "notice", level: "warn", text });
     for (const entry of historyToEntries(this.opts.resumed, this.project.tools)) this.print(entry);
+    this.refreshModels();
     this.render();
 
     return new Promise((resolve) => (this.finished = resolve));
+  }
+
+  /** Fetches the server's model list in the background, for completing /model. */
+  private refreshModels(): void {
+    this.server
+      .listModels()
+      .then((models) => {
+        this.knownModels = models.map((m) => m.id);
+      })
+      .catch(() => {});
   }
 
   private printBanner(resumed: boolean): void {
@@ -330,6 +333,7 @@ export class TuiApp {
       const placeholder = this.busy ? "Type to add to what the agent is doing (enter queues it)" : "Ask for something, or /help";
       const prompt = prefixed([{ text: "› ", style: { color: "cyan" } }], [{ text: "  " }], this.editor.render(placeholder), width - 4);
       lines.push([], ...box(prompt, "gray", width, true));
+      lines.push(...this.suggestionLines(width));
     }
     lines.push(this.statusLine(width));
     return lines;
@@ -428,6 +432,49 @@ export class TuiApp {
     this.requestRender();
   }
 
+  /** Command suggestions for what's in the input, unless dismissed or something else has the keys. */
+  private suggestions(): Suggestion[] {
+    if (this.busy || this.approval || this.picker) return [];
+    const value = this.editor.value;
+    if (value === this.dismissedFor) return [];
+    return suggest(value, {
+      cwd: this.project.cwd,
+      endpoints: this.opts.endpoints.map((e) => e.name),
+      models: this.knownModels,
+    });
+  }
+
+  /** Tab: fill in the suggestion; a command that takes an argument gets a space, so its completions show. */
+  private completeSuggestion(s: Suggestion): void {
+    const command = !s.text.includes(" ");
+    const takesArgs = command && /[[|]/.test(s.label);
+    this.editor.setValue(s.text + (takesArgs ? " " : ""));
+    this.suggestionIndex = 0;
+  }
+
+  private suggestionLines(width: number): Line[] {
+    const items = this.suggestions();
+    if (items.length === 0) return [];
+    const max = 8;
+    const at = Math.min(this.suggestionIndex, items.length - 1);
+    const start = Math.min(Math.max(0, at - Math.floor(max / 2)), Math.max(0, items.length - max));
+    const labelWidth = Math.min(28, Math.max(...items.map((i) => i.label.length)));
+    const lines = items.slice(start, start + max).map((item, i): Line => {
+      const selected = start + i === at;
+      return truncate(
+        [
+          { text: selected ? " › " : "   ", style: { color: "cyan" } },
+          { text: item.label.padEnd(labelWidth), style: selected ? { color: "cyan", bold: true } : undefined },
+          { text: item.hint ? `  ${item.hint}` : "", style: DIM },
+        ],
+        width,
+      );
+    });
+    const more = items.length - (start + max);
+    lines.push([{ text: `   ${more > 0 ? `${more} more · ` : ""}tab completes · enter runs · esc hides`, style: DIM }]);
+    return lines;
+  }
+
   /** The spinner text for the tools in flight: one tool, or how many run in parallel. */
   private runningLabel(): string {
     const labels = [...this.running.values()];
@@ -517,7 +564,29 @@ export class TuiApp {
     }
 
     if (key.name === "char" && key.ctrl && key.text === "d" && !this.editor.value) return this.exit();
+
+    // While command suggestions are showing, arrows pick one, tab completes it and enter runs it.
+    const suggestions = this.suggestions();
+    if (suggestions.length > 0 && !key.ctrl && !key.meta && !key.shift) {
+      const at = Math.min(this.suggestionIndex, suggestions.length - 1);
+      if (key.name === "up" || key.name === "down") {
+        this.suggestionIndex = (at + (key.name === "up" ? suggestions.length - 1 : 1)) % suggestions.length;
+        return;
+      }
+      if (key.name === "tab") return this.completeSuggestion(suggestions[at]!);
+      if (key.name === "return") {
+        this.editor.setValue(suggestions[at]!.text);
+        return void this.submit(this.editor.commit());
+      }
+      if (key.name === "escape") {
+        this.dismissedFor = this.editor.value;
+        return;
+      }
+    }
+
+    const before = this.editor.value;
     if (this.editor.handle(key) === "submit") void this.submit(this.editor.commit());
+    if (this.editor.value !== before) this.suggestionIndex = 0;
   }
 
   // ---- commands ----
@@ -840,6 +909,7 @@ export class TuiApp {
       const contextSize = await next.contextSize(model);
       this.agent.setModel(model, contextSize, next.client);
       this.server = next;
+      this.refreshModels();
       this.opts.savePreferences({ server: next, model });
       const window = contextSize ? `${contextSize.toLocaleString()}-token context` : "context size unknown";
       this.print({ kind: "notice", level: "info", text: `Connected to ${next.label}, using ${model} (${window}).` });
