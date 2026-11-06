@@ -140,7 +140,10 @@ export class Sandbox {
   }
 }
 
-export function bwrapArgs(cwd: string, network: boolean, readOnlyPaths: string[] = []): string[] {
+export function bwrapArgs(cwdGiven: string, network: boolean, readOnlyPaths: string[] = []): string[] {
+  // bwrap mounts at paths as given and can't create mount points through
+  // symlinks, so every path is resolved to where it really is first.
+  const cwd = realpath(cwdGiven) ?? cwdGiven;
   const args = ["--unshare-all"];
   if (network) args.push("--share-net");
   args.push("--die-with-parent", "--new-session");
@@ -160,7 +163,8 @@ export function bwrapArgs(cwd: string, network: boolean, readOnlyPaths: string[]
   for (const rel of HIDDEN_HOME_PATHS) hide(args, path.join(home, rel));
 
   for (const dir of readOnlyPaths) {
-    if (isDirectory(dir)) args.push("--ro-bind", dir, dir);
+    const real = realpath(dir);
+    if (real && isDirectory(real)) args.push("--ro-bind", real, real);
   }
 
   const git = path.join(cwd, ".git");
@@ -181,15 +185,25 @@ export function bwrapArgs(cwd: string, network: boolean, readOnlyPaths: string[]
   return args;
 }
 
+/**
+ * Hides a path: an empty folder over a directory, /dev/null over a file.
+ * Symlinks (e.g. ~/.npmrc or ~/.config managed by a dotfiles repository) are
+ * followed, and the real location is hidden, so the link leads to nothing.
+ * A missing path or a broken link has nothing to hide.
+ */
 function hide(args: string[], target: string): void {
-  let stat: fs.Stats;
+  const real = realpath(target);
+  if (!real) return;
+  if (isDirectory(real)) args.push("--tmpfs", real);
+  else args.push("--ro-bind", "/dev/null", real);
+}
+
+function realpath(p: string): string | undefined {
   try {
-    stat = fs.lstatSync(target);
+    return fs.realpathSync(p);
   } catch {
-    return;
+    return undefined;
   }
-  if (stat.isDirectory()) args.push("--tmpfs", target);
-  else args.push("--ro-bind", "/dev/null", target);
 }
 
 function isDirectory(dir: string): boolean {

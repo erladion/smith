@@ -93,6 +93,25 @@ describe("bash in the sandbox", { skip: !available && "bwrap is not available" }
     }
   });
 
+  test("hidden paths that are symlinks are followed, not a reason to fail", async () => {
+    // Dotfile managers make ~/.npmrc or the whole ~/.config a symlink into a repository.
+    const dotfiles = fs.mkdtempSync(path.join(os.homedir(), ".agent-dotfiles-"));
+    try {
+      fs.mkdirSync(path.join(dotfiles, "config", "gh"), { recursive: true });
+      fs.writeFileSync(path.join(dotfiles, "config", "gh", "hosts.yml"), "token: SECRET-gh");
+      fs.writeFileSync(path.join(dotfiles, "npmrc"), "SECRET-npm");
+      fs.symlinkSync(path.join(dotfiles, "config"), path.join(home, ".config"));
+      fs.symlinkSync(path.join(dotfiles, "npmrc"), path.join(home, ".npmrc"));
+      fs.symlinkSync(path.join(dotfiles, "missing"), path.join(home, ".pypirc"));
+      const res = await run("cat ~/.npmrc ~/.config/gh/hosts.yml 2>/dev/null; echo end");
+      assert.equal(res.isError, undefined, res.content);
+      assert.doesNotMatch(res.content, /SECRET/);
+    } finally {
+      for (const link of [".config", ".npmrc", ".pypirc"]) fs.rmSync(path.join(home, link), { force: true });
+      fs.rmSync(dotfiles, { recursive: true, force: true });
+    }
+  });
+
   test("the network is blocked unless enabled", async () => {
     const server = http.createServer((_, res) => res.end("ok"));
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));

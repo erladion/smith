@@ -19,6 +19,7 @@ import { markdownLines, safeSplit } from "./markdown.js";
 import { Picker } from "./picker.js";
 import { InlineRenderer } from "./renderer.js";
 import { isGitRepo, listFolders, tildify } from "./folders.js";
+import { formatDuration, turnSummary } from "./duration.js";
 import { greeting } from "./greetings.js";
 import { historyToEntries } from "./replay.js";
 import type { Line } from "./style.js";
@@ -141,6 +142,8 @@ export class TuiApp {
   private busy = false;
   private abort: AbortController | null = null;
   private context: { tokens: number; limit?: number } | null = null;
+  /** The running turn: when it started, how many tools it ran, how it ended. */
+  private turn: { started: number; toolCalls: number; reason?: string } | null = null;
   /** Tools running right now (several when read-only tools run in parallel), by call id. */
   private readonly running = new Map<string, string>();
 
@@ -303,7 +306,8 @@ export class TuiApp {
       lines.push(...(this.live.kind === "text" ? markdownLines(this.live.text, width) : wrap([{ text: this.live.text, style: REASONING }], width)));
     }
     if (this.activity && !this.approval) {
-      lines.push([], truncate([{ text: SPINNER[this.frame]!, style: { color: "yellow" } }, { text: ` ${this.activity}`, style: DIM }], width));
+      const elapsed = this.turn ? ` · ${formatDuration(Date.now() - this.turn.started)}` : "";
+      lines.push([], truncate([{ text: SPINNER[this.frame]!, style: { color: "yellow" } }, { text: ` ${this.activity}${elapsed}`, style: DIM }], width));
     }
     if (this.approval) {
       lines.push([], ...this.approvalBox(this.approval, width));
@@ -394,6 +398,7 @@ export class TuiApp {
         this.activity = this.runningLabel();
         break;
       case "tool_end":
+        if (this.turn) this.turn.toolCalls++;
         this.running.delete(event.id);
         this.activity = this.runningLabel();
         this.print({ kind: "tool", name: event.name, summary: event.summary, output: event.output, isError: event.isError, diff: event.diff });
@@ -410,7 +415,7 @@ export class TuiApp {
         this.print({ kind: "notice", level: event.level, text: event.text });
         break;
       case "done":
-        if (event.reason === "interrupted") this.print({ kind: "notice", level: "warn", text: "Interrupted." });
+        if (this.turn) this.turn.reason = event.reason;
         break;
     }
     this.requestRender();
@@ -553,7 +558,11 @@ export class TuiApp {
     }
 
     this.print({ kind: "user", text });
+    this.turn = { started: Date.now(), toolCalls: 0 };
     await this.runBusy("Thinking…", (signal) => this.agent.send(text, signal));
+    const turn = this.turn;
+    this.turn = null;
+    if (turn && !this.closed) this.print({ kind: "meta", text: turnSummary(turn.reason, Date.now() - turn.started, turn.toolCalls) });
   }
 
   /** Runs agent work with the spinner on and esc wired to interrupt it. */

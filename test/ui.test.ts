@@ -261,3 +261,14 @@ test("Agent Smith greets Mr. Anderson, and says we meet again on a resumed sessi
   }
   assert.equal(greeting(true, () => 0), "We meet again, Mr. Anderson.");
 });
+
+test("durations and turn summaries", async () => {
+  const { formatDuration, turnSummary } = await import("../src/ui/duration.js");
+  assert.deepEqual([38, 4200, 42_900, 65_000, 3_725_000].map(formatDuration), ["38ms", "4.2s", "42s", "1m 05s", "1h 02m"]);
+  assert.equal(turnSummary("stop", 83_000, 7), "Done in 1m 23s · 7 tool calls");
+  assert.equal(turnSummary("stop", 2_500, 1), "Done in 2.5s · 1 tool call");
+  assert.equal(turnSummary("stop", 2_500, 0), "Done in 2.5s");
+  assert.equal(turnSummary("interrupted", 12_000, 2), "Interrupted after 12s · 2 tool calls");
+  assert.equal(turnSummary("max_steps", 600_000, 50), "Stopped at the step limit after 10m 00s · 50 tool calls");
+  assert.equal(turnSummary(undefined, 3_000, 0), "Stopped after 3.0s");
+});

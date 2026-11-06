@@ -25,7 +25,9 @@ export type Entry =
   | { kind: "text"; text: string }
   | { kind: "reasoning"; text: string }
   | { kind: "tool"; name: string; summary: string; output: string; isError: boolean; diff?: DiffLine[] }
-  | { kind: "notice"; level: NoticeLevel; text: string };
+  | { kind: "notice"; level: NoticeLevel; text: string }
+  /** Quiet information, e.g. how long a turn took. */
+  | { kind: "meta"; text: string };
 
 export const DIM: Style = { dim: true };
 export const REASONING: Style = { dim: true, italic: true };
@@ -48,6 +50,8 @@ export function entryLines(entry: Entry, width: number): Line[] {
       return [[], ...wrap([{ text: entry.text, style: { color: NOTICE_COLORS[entry.level] } }], width)];
     case "tool":
       return [[], ...toolLines(entry, width)];
+    case "meta":
+      return [[], ...wrap([{ text: entry.text, style: DIM }], width)];
   }
 }
 

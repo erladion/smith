@@ -20,6 +20,7 @@ import { fastTools } from "./core/toolchain.js";
 import { defaultTools } from "./core/tools/index.js";
 import { createSkillTool } from "./core/tools/skill.js";
 import { type AgentHooks, type AgentSettings, type ProjectView, TuiApp } from "./ui/app.js";
+import { turnSummary } from "./ui/duration.js";
 import { FAREWELL } from "./ui/greetings.js";
 import { describeError } from "./core/errors.js";
 import { useSystemNetworkSettings } from "./core/network.js";
@@ -355,7 +356,11 @@ async function runHeadless(
   const controller = new AbortController();
   process.once("SIGINT", () => controller.abort());
 
+  let toolCalls = 0;
+  let reason: string | undefined;
   const onEvent = (event: AgentEvent) => {
+    if (event.type === "tool_end") toolCalls++;
+    if (event.type === "done") reason = event.reason;
     switch (event.type) {
       case "delta":
         if (event.kind === "text") process.stdout.write(event.text);
@@ -381,12 +386,14 @@ async function runHeadless(
     },
   });
 
+  const started = Date.now();
   try {
     await agent.send(prompt, controller.signal);
   } catch (err) {
     process.stderr.write(`${describeError(err, baseURL)}\n`);
     process.exitCode = 1;
   }
+  process.stderr.write(`[${turnSummary(reason, Date.now() - started, toolCalls)}]\n`);
 }
 
 main().catch((err: unknown) => {
