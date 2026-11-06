@@ -84,6 +84,20 @@ npm run dev -- -c                             # resume the last session in this 
 current directory; the folder you work in is the project, the only place the agent can change
 files. `--resume <id>` goes back to the folder the session was in.
 
+## Network: HTTPS and proxies
+
+Connections to the model server work like `curl` on the same machine:
+
+- **Certificates.** Besides the runtime's built-in CAs, the agent trusts the system certificate
+  store. A server signed by an internal CA works once that CA is in the store (RHEL: copy it to
+  `/etc/pki/ca-trust/source/anchors/` and run `sudo update-ca-trust`). `NODE_EXTRA_CA_CERTS=/path/ca.pem`
+  adds one without touching the system.
+- **Proxies.** `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` are used. Running from source on Node 22,
+  start it with `node --use-env-proxy --no-warnings dist/cli.js` for that (Node 26 and both
+  binaries don't need it).
+- **Errors say why.** "Could not reach" is followed by the actual cause (certificate, refused,
+  DNS, timeout) and a hint.
+
 ## Endpoints
 
 Servers you use regularly go in `~/.config/agent/config.json`:

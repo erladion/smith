@@ -44,7 +44,18 @@ await build({
 
 fs.writeFileSync(
   seaConfig,
-  JSON.stringify({ main: bundle, mainFormat: "module", output: binary, disableExperimentalSEAWarning: true }, null, 2),
+  JSON.stringify(
+    {
+      main: bundle,
+      mainFormat: "module",
+      output: binary,
+      disableExperimentalSEAWarning: true,
+      // Like curl: trust the system certificate store, and use HTTPS_PROXY etc.
+      execArgv: ["--use-system-ca", "--use-env-proxy"],
+    },
+    null,
+    2,
+  ),
 );
 execFileSync(process.execPath, ["--build-sea", seaConfig], { stdio: "inherit" });
 

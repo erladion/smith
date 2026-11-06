@@ -24,7 +24,21 @@ const version = process.env.AGENT_VERSION || JSON.parse(fs.readFileSync(path.joi
 fs.mkdirSync(path.dirname(binary), { recursive: true });
 execFileSync(
   bun,
-  ["build", "src/cli.ts", "--compile", "--define", `__AGENT_VERSION__=${JSON.stringify(version)}`, "--outfile", binary],
+  [
+    "build",
+    "src/cli.ts",
+    "--compile",
+    // Like curl: trust the system certificate store (Bun uses HTTPS_PROXY etc. by itself).
+    "--compile-exec-argv=--use-system-ca",
+    // Don't load .env or bunfig.toml from the directory the agent runs in: that is
+    // the project, possibly an untrusted repository, and bunfig.toml can preload code.
+    "--no-compile-autoload-dotenv",
+    "--no-compile-autoload-bunfig",
+    "--define",
+    `__AGENT_VERSION__=${JSON.stringify(version)}`,
+    "--outfile",
+    binary,
+  ],
   { cwd: root, stdio: "inherit" },
 );
 

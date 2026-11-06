@@ -3,7 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
+import OpenAI from "openai";
 import { chooseTail, SUMMARY_PREFIX, trimOldToolResults } from "../src/core/context.js";
+import { describeError } from "../src/core/errors.js";
 import type { Message } from "../src/core/history.js";
 import { listSessions, Session } from "../src/core/session.js";
 import { ThinkTagParser } from "../src/core/think.js";
@@ -111,5 +113,25 @@ describe("sessions", () => {
       [older, "Fix the login bug", 2],
     ]);
     assert.deepEqual(listSessions("/listing", 1).map((s) => s.id), [newer]);
+  });
+});
+
+describe("connection errors", () => {
+  // The SDK wraps fetch's TypeError, which wraps the system or TLS error.
+  const wrapped = (code: string, message: string) =>
+    new OpenAI.APIConnectionError({ cause: Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error(message), { code }) }) });
+
+  test("show the real cause and a hint", () => {
+    const tls = describeError(wrapped("UNABLE_TO_VERIFY_LEAF_SIGNATURE", "unable to verify the first certificate; if the root CA is installed locally, try running Node.js with --use-system-ca"), "https://x/v1");
+    assert.match(tls, /^Could not reach https:\/\/x\/v1: unable to verify the first certificate \(UNABLE_TO_VERIFY_LEAF_SIGNATURE\)\./);
+    assert.match(tls, /update-ca-trust/);
+    assert.doesNotMatch(tls, /try running Node\.js/);
+    assert.match(describeError(wrapped("ECONNREFUSED", "connect ECONNREFUSED 10.0.0.5:8000"), "u"), /Nothing is listening/);
+    assert.match(describeError(wrapped("ENOTFOUND", "getaddrinfo ENOTFOUND gpu-box"), "u"), /doesn't resolve/);
+    assert.match(describeError(wrapped("UND_ERR_CONNECT_TIMEOUT", "Connect Timeout Error"), "u"), /HTTPS_PROXY/);
+  });
+
+  test("without a cause, the old message", () => {
+    assert.match(describeError(new OpenAI.APIConnectionError({}), "u"), /Could not reach u\. Is the server running\?/);
   });
 });

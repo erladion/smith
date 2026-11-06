@@ -83,6 +83,19 @@ jobs:
           docker run --rm -v "$PWD/build/agent-bun:/usr/local/bin/agent:ro" registry.access.redhat.com/ubi9/ubi-minimal:latest \
             agent --version
 
+      - name: Check that the Bun build ignores a project's .env and bunfig.toml
+        run: |
+          # Bun binaries load both from the current directory unless told not to;
+          # for an agent that's the project, and bunfig.toml can preload code.
+          dir=$(mktemp -d) && cd "$dir"
+          echo "AGENT_BASE_URL=http://should-not-be-used.invalid/v1" > .env
+          printf 'preload = ["./preload.ts"]\n' > bunfig.toml
+          echo 'require("fs").writeFileSync("PRELOAD-RAN", "")' > preload.ts
+          out=$("$GITHUB_WORKSPACE/build/agent-bun" -p hi --model x --sandbox off 2>&1 || true)
+          if [ -e PRELOAD-RAN ] || grep -q should-not-be-used <<<"$out"; then
+            echo "::error::The Bun binary loaded the project's .env or bunfig.toml"; echo "$out"; exit 1
+          fi
+
       - name: Package
         run: |
           # tar.gz rather than tar.xz: RHEL 9 doesn't install xz by default.

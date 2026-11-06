@@ -85,7 +85,9 @@ export class Server {
     } catch (err) {
       // The server may not implement /v1/models; a configured model still works.
       if (this.options.model) return this.options.model;
-      throw new Error(`Could not list models at ${this.baseURL}: ${describeError(err, this.baseURL)}\nStart the server or pass --model.`);
+      // A connection error explains itself; otherwise say what we were doing and the way around it.
+      if (err instanceof OpenAI.APIConnectionError) throw new Error(describeError(err, this.baseURL));
+      throw new Error(`Could not list models at ${this.baseURL}: ${describeError(err, this.baseURL)}\nPass --model, or set "model" for the endpoint in the config file.`);
     }
     const ids = new Set(models.map((m) => m.id));
     const match = [...preferred, this.options.model].find((id): id is string => id !== undefined && ids.has(id));

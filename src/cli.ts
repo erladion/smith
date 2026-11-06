@@ -22,6 +22,7 @@ import { createSkillTool } from "./core/tools/skill.js";
 import { type AgentHooks, type AgentSettings, type ProjectView, TuiApp } from "./ui/app.js";
 import { FAREWELL } from "./ui/greetings.js";
 import { describeError } from "./core/errors.js";
+import { useSystemNetworkSettings } from "./core/network.js";
 import { VERSION } from "./version.js";
 
 const HELP = `Usage: agent [options] [folder]
@@ -60,6 +61,7 @@ One-shot:
 Endpoints are configured in ~/.config/agent/config.json; run --endpoints for an example.`;
 
 async function main(): Promise<void> {
+  useSystemNetworkSettings();
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
