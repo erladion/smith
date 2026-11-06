@@ -37,6 +37,7 @@ const ConfigSchema = z.strictObject({
   default: z.string().optional(),
   maxSteps: z.number().int().min(1).max(10_000).optional().describe("Model calls allowed per message before the agent stops"),
   subagents: z.boolean().optional().describe("Give the model the task tool for read-only sub-agents (default true)"),
+  toolLog: z.boolean().optional().describe("Log every tool call to ~/.local/share/agent/logs (default true)"),
   endpoints: z.record(z.string(), EndpointSchema).default({}),
 });
 
@@ -56,6 +57,8 @@ export interface Config {
   maxSteps?: number;
   /** Whether the model gets the task tool (sub-agents). */
   subagents: boolean;
+  /** Whether tool calls are logged to logs/<session>.jsonl. */
+  toolLog: boolean;
   /** Problems worth telling the user about that don't stop the agent. */
   warnings: string[];
 }
@@ -85,7 +88,7 @@ export function loadConfig(file = configPath()): Config {
   try {
     raw = fs.readFileSync(file, "utf8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { file, endpoints: [], subagents: true, warnings: [] };
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { file, endpoints: [], subagents: true, toolLog: true, warnings: [] };
     throw err;
   }
 
@@ -118,5 +121,5 @@ export function loadConfig(file = configPath()): Config {
     warnings.push(`${file} contains API keys but other users can read it. Run: chmod 600 ${file}`);
   }
 
-  return { file, endpoints, defaultEndpoint: config.default, maxSteps: config.maxSteps, subagents: config.subagents ?? true, warnings };
+  return { file, endpoints, defaultEndpoint: config.default, maxSteps: config.maxSteps, subagents: config.subagents ?? true, toolLog: config.toolLog ?? true, warnings };
 }

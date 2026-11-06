@@ -10,6 +10,7 @@ import type { Message } from "../src/core/history.js";
 import { defaultName, findSession, listSessions, secureSessions, Session, sessionsDir } from "../src/core/session.js";
 import { loadPreferences, savePreferences } from "../src/core/preferences.js";
 import { ThinkTagParser } from "../src/core/think.js";
+import { ToolLog, toolLogFile } from "../src/core/toollog.js";
 
 describe("ThinkTagParser", () => {
   const run = (chunks: string[]) => {
@@ -91,6 +92,24 @@ describe("sessions", () => {
     fs.chmodSync(session.file, 0o644);
     Session.open(session.id).session.record({ type: "append", message: { role: "assistant", content: "ok" } });
     assert.equal(mode(session.file), "600");
+  });
+
+  test("the tool log appends one private JSON line per call to the session's log", () => {
+    let id = "s-one";
+    const log = new ToolLog(() => id, () => "/project");
+    const run = { time: "2026-11-06T10:00:00.000Z", tool: "bash", input: { command: "ls" }, approval: "allowed" as const, status: "ok" as const, durationMs: 12, output: "a\nb" };
+    log.write(run);
+    log.write({ ...run, output: "x".repeat(20_000) });
+    id = "s-two";
+    log.write({ ...run, tool: "grep", approval: undefined, status: "invalid" });
+
+    const lines = fs.readFileSync(toolLogFile("s-one"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(lines[0], { time: run.time, session: "s-one", cwd: "/project", tool: "bash", input: { command: "ls" }, approval: "allowed", status: "ok", durationMs: 12, output: "a\nb" });
+    assert.equal(lines[1].output.length, 10_000);
+    assert.equal(lines[1].outputChars, 20_000);
+    assert.equal(JSON.parse(fs.readFileSync(toolLogFile("s-two"), "utf8")).tool, "grep");
+    assert.equal(mode(toolLogFile("s-one")), "600");
+    assert.equal(mode(path.dirname(toolLogFile("s-one"))), "700");
   });
 
   test("preferences are private", () => {

@@ -128,6 +128,7 @@ Servers you use regularly go in `~/.config/agent/config.json`:
 At the top level, next to `endpoints`, `"maxSteps": 120` sets how many model calls one message
 may use before the agent stops and asks you (default 50; `--max-steps` overrides it for one run).
 Raise it for long autonomous tasks; when it stops, sending "continue" gives it a fresh budget.
+`"toolLog": false` turns off the [tool log](#tool-log).
 
 `--endpoints` lists them, `-e <name>` starts on one, and `/endpoint` switches mid-conversation.
 Without `-e`, the agent starts on the resumed session's endpoint, else the one used last, else
@@ -265,6 +266,33 @@ folder's (moving to that folder), and `/new` starts a fresh one. Resuming or swi
 the transcript and continues on the endpoint and model the session last used, when they're still
 available.
 
+## Tool log
+
+Every tool call is also logged, one JSON object per line, to
+`~/.local/share/agent/logs/<session id>.jsonl` (readable by you only, like sessions). A line
+says when the call started, which session and folder it ran in, the tool and its arguments,
+how approval went, how it ended and how long it took, and its output (cut at 10,000
+characters; the session keeps all of it). Calls made by sub-agents carry `"subagent"`.
+
+```json
+{"time":"2026-11-06T12:56:14.043Z","session":"20261106-125613-704d","cwd":"/home/me/git/webapp",
+ "tool":"bash","input":{"command":"npm test"},"approval":"allowed","status":"ok","durationMs":2140,"output":"..."}
+```
+
+| Field | Values |
+|---|---|
+| `approval` | `not needed` (read-only, inside the project), `allowed`, `allowed always`, `already allowed` (always-allowed earlier in the session), `denied`; missing when the call failed before that point |
+| `status` | `ok`, `error` (the tool failed), `denied` (you said no), `invalid` (unknown tool or bad arguments) |
+
+Compaction doesn't touch the log, so it keeps everything the agent did. Nothing deletes old
+logs; remove them when you like. For example, every shell command the agent ran:
+
+```sh
+jq -c 'select(.tool == "bash") | [.time, .input.command, .status]' ~/.local/share/agent/logs/*.jsonl
+```
+
+Set `"toolLog": false` in the config file to turn it off.
+
 ## Context management
 
 The context window is read from llama.cpp's `/props` or vLLM's model listing, or set with
@@ -279,6 +307,7 @@ the agent compacts once and retries, learning the window size from llama.cpp's e
 src/core/agent.ts        the loop: stream, run tools, feed results back; compaction
 src/core/context.ts      token estimates, trimming, summary prompt, overflow detection
 src/core/session.ts      JSONL session logs
+src/core/toollog.ts      the per-session log of tool calls
 src/core/config.ts       config file of named endpoints
 src/core/server.ts       one server: client, model listing, context-size detection
 src/core/reasoning.ts    reasoning levels -> request fields

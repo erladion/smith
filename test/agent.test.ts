@@ -11,6 +11,7 @@ import type { AgentEvent } from "../src/core/events.js";
 import type { HistoryChange, Message } from "../src/core/history.js";
 import { defaultTools } from "../src/core/tools/index.js";
 import { defineTool } from "../src/core/tool.js";
+import type { ToolRun } from "../src/core/toollog.js";
 import { z } from "zod";
 import { type FakeServer, startFakeServer, toolCallDeltas } from "./fake-server.js";
 
@@ -391,4 +392,43 @@ test("a resumed history with an unanswered tool call is repaired", async () => {
   const sent = fake.requests[0]!.messages;
   assert.equal(sent[3].role, "tool");
   assert.equal(sent[3].tool_call_id, "t1");
+});
+
+test("reports every tool call for the tool log, whatever its outcome", async () => {
+  const call = (index: number, name: string, args: object) => ({
+    tool_calls: [{ index, id: `t${index}`, type: "function", function: { name, arguments: JSON.stringify(args) } }],
+  });
+  const runs: ToolRun[] = [];
+  fake.script = [
+    { deltas: [call(0, "bash", { command: "echo logged" }), call(1, "no_such_tool", {}), call(2, "glob", { pattern: "*.nothing" })], finish: "tool_calls" },
+    { deltas: toolCallDeltas("bash", { command: "echo refused" }), finish: "tool_calls" },
+    { deltas: toolCallDeltas("task", { description: "look", prompt: "look around" }), finish: "tool_calls" },
+    // The sub-agent's call, then its report, then the parent's answer.
+    { deltas: toolCallDeltas("glob", { pattern: "*.md" }, "s1"), finish: "tool_calls" },
+    { deltas: [{ content: "nothing here" }], finish: "stop" },
+    { deltas: [{ content: "done" }], finish: "stop" },
+  ];
+  const decisions: ApprovalDecision[] = ["allow", "deny"];
+  const { agent } = makeAgent("allow", {
+    approve: async () => decisions.shift()!,
+    onToolRun: (run) => runs.push(run),
+    subagentPrompt: "SUB",
+  });
+  await agent.send("go", new AbortController().signal);
+
+  assert.deepEqual(
+    runs.map((r) => [r.tool, r.status, r.approval, r.subagent]),
+    [
+      ["bash", "ok", "allowed", undefined],
+      ["no_such_tool", "invalid", undefined, undefined],
+      ["glob", "ok", "not needed", undefined],
+      ["bash", "denied", "denied", undefined],
+      ["glob", "ok", "not needed", "look"],
+      ["task", "ok", "not needed", undefined],
+    ],
+  );
+  assert.deepEqual(runs[0]!.input, { command: "echo logged" });
+  assert.equal(runs[0]!.output, "logged");
+  assert.equal(runs[5]!.output, "nothing here");
+  assert.ok(runs.every((r) => !Number.isNaN(Date.parse(r.time)) && r.durationMs >= 0));
 });

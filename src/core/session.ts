@@ -161,6 +161,7 @@ export class Session {
 export function secureSessions(): void {
   privateTree(path.dirname(sessionsDir()), /^$/);
   privateTree(sessionsDir(), /\.jsonl$/);
+  privateTree(path.join(path.dirname(sessionsDir()), "logs"), /\.jsonl$/);
 }
 
 /**

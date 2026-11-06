@@ -25,6 +25,7 @@ import { shortPath } from "./ui/folders.js";
 import { FAREWELL } from "./ui/greetings.js";
 import { describeError } from "./core/errors.js";
 import { useSystemNetworkSettings } from "./core/network.js";
+import { ToolLog } from "./core/toollog.js";
 import { VERSION } from "./version.js";
 
 const HELP = `Usage: agent [options] [folder]
@@ -149,6 +150,7 @@ async function main(): Promise<void> {
   let session = resumed?.session ?? Session.create(cwd, model, server.name);
   session.recordModel(model, server.name);
   const history = resumed?.messages ?? [];
+  const toolLog = config.toolLog ? new ToolLog(() => session.id, () => project.cwd) : undefined;
   /**
    * An agent for the current project. The first one continues the resumed
    * conversation with the startup settings; later ones (a new project) start
@@ -170,6 +172,7 @@ async function main(): Promise<void> {
       systemPrompt: buildSystemPrompt(project.cwd, { instructions, skills, fastTools: fastTools() }),
       subagentPrompt: config.subagents ? buildSubagentPrompt(project.cwd, { instructions, skills }) : undefined,
       onHistory: (change) => session.record(change),
+      onToolRun: toolLog && ((run) => toolLog.write(run)),
       ...hooks,
     });
   };

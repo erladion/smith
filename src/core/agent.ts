@@ -19,6 +19,7 @@ import { type HistoryChange, type Message, messageText, repairHistory } from "./
 import { stripThinkTags, ThinkTagParser } from "./think.js";
 import { type ToolDef, type ToolResult, toApiTool, truncate } from "./tool.js";
 import { createTaskTool, type TaskInput } from "./tools/task.js";
+import type { ToolApproval, ToolRun } from "./toollog.js";
 import { Checkpoint, restore } from "./undo.js";
 
 type AssistantMessage = OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam;
@@ -83,6 +84,8 @@ export interface AgentOptions {
    */
   approve: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   onEvent: (event: AgentEvent) => void;
+  /** Called when each tool call is over, whatever the outcome, e.g. for the tool log. */
+  onToolRun?: (run: ToolRun) => void;
 }
 
 interface ToolCall {
@@ -383,6 +386,7 @@ export class Agent {
       alwaysAllowed: this.alwaysAllowed,
       // Its tools are read-only, but reading outside the project still asks you.
       approve: (req) => this.requestApproval({ ...req, note: `Sub-agent "${description}": ${req.note ?? ""}`.trim() }),
+      onToolRun: (run) => this.opts.onToolRun?.({ ...run, subagent: description }),
       onEvent: (event) => {
         if (event.type === "tool_start") emit({ type: "activity", text: `${description} › ${event.name} ${event.summary}` });
         else if (event.type === "done") reason = event.reason;
@@ -594,8 +598,14 @@ export class Agent {
   private async runTool(call: ToolCall, signal: AbortSignal): Promise<ToolResult> {
     const emit = this.opts.onEvent;
     const tool = this.toolsByName.get(call.name);
-    const fail = (content: string, summary = ""): ToolResult => {
+    const time = new Date().toISOString();
+    let input: unknown = call.args;
+    let approval: ToolApproval | undefined;
+    const log = (status: ToolRun["status"], output: string, durationMs = 0) =>
+      this.opts.onToolRun?.({ time, tool: call.name, input, approval, status, durationMs, output });
+    const fail = (content: string, summary = "", status: ToolRun["status"] = "invalid"): ToolResult => {
       emit({ type: "tool_end", id: call.id, name: call.name, summary, output: content, isError: true });
+      log(status, content);
       return { content, isError: true };
     };
 
@@ -606,47 +616,56 @@ export class Agent {
     let raw: unknown;
     try {
       raw = call.args.trim() ? JSON.parse(call.args) : {};
+      input = raw;
     } catch {
       return fail(`The arguments were not valid JSON: ${truncate(call.args, 500)}`);
     }
     const parsed = tool.schema.safeParse(raw);
     if (!parsed.success) return fail(`Invalid arguments:\n${z.prettifyError(parsed.error)}`);
 
-    const input = parsed.data;
-    const summary = tool.summarize(input);
+    const args = parsed.data;
+    const summary = tool.summarize(args);
 
     const ctx = this.toolContext(tool, signal);
-    const reason = tool.readOnly ? await tool.approvalReason?.(input, ctx).catch(() => undefined) : undefined;
-    if ((!tool.readOnly || reason) && !this.alwaysAllowed.has(tool.name)) {
+    const reason = tool.readOnly ? await tool.approvalReason?.(args, ctx).catch(() => undefined) : undefined;
+    const needsApproval = !tool.readOnly || Boolean(reason);
+    approval = needsApproval ? "already allowed" : "not needed";
+    if (needsApproval && !this.alwaysAllowed.has(tool.name)) {
       // Show the change in the prompt; a call that would fail anyway fails without asking.
       let preview: DiffLine[] | undefined;
       try {
-        preview = await tool.preview?.(input, ctx);
+        preview = await tool.preview?.(args, ctx);
       } catch (err) {
-        return fail(err instanceof Error ? err.message : String(err), summary);
+        // Fails without asking: the call couldn't have worked.
+        approval = undefined;
+        return fail(err instanceof Error ? err.message : String(err), summary, "error");
       }
       const sandbox = this.opts.sandbox ?? Sandbox.none();
       const decision = await this.requestApproval({
         tool: tool.name,
         summary,
-        input,
+        input: args,
         preview,
         note: reason,
         sandbox: tool.sandboxed ? { active: sandbox.active, description: sandbox.describe() } : undefined,
       });
       if (decision === "deny" || signal.aborted) {
-        return fail("The user declined this tool call. Ask them how they want to proceed.", summary);
+        approval = "denied";
+        return fail("The user declined this tool call. Ask them how they want to proceed.", summary, "denied");
       }
+      approval = decision === "allow_always" ? "allowed always" : "allowed";
       if (decision === "allow_always") this.alwaysAllowed.add(tool.name);
     }
 
     emit({ type: "tool_start", id: call.id, name: tool.name, summary });
+    const started = performance.now();
     let result: ToolResult;
     try {
-      result = await tool.run(input, ctx);
+      result = await tool.run(args, ctx);
     } catch (err) {
       result = { content: err instanceof Error ? err.message : String(err), isError: true };
     }
+    log(result.isError ? "error" : "ok", result.content, Math.round(performance.now() - started));
     emit({
       type: "tool_end",
       id: call.id,

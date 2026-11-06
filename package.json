@@ -1,6 +1,6 @@
 {
   "name": "agent",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "A small agentic coding harness with a terminal UI for OpenAI-compatible endpoints",
   "scripts": {
     "dev": "tsx src/cli.ts",
