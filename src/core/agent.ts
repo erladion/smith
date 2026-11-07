@@ -458,7 +458,7 @@ export class Agent {
       return true;
     }
 
-    emit({ type: "activity", text: "Summarizing the conversation to free context…" });
+    emit({ type: "activity", text: "Summarizing the conversation to free context…", compacting: true });
     const maxChars = Math.max(8_000, Math.floor((limit - fixedCost - 4_096) * CHARS_PER_TOKEN * 0.8));
     const summary = await this.summarize(head, maxChars, signal);
     const intro = SUMMARY_PREFIX + summary;
@@ -495,7 +495,7 @@ export class Agent {
       },
       { signal },
     );
-    const summary = stripThinkTags(response.choices[0]?.message.content ?? "");
+    const summary = stripThinkTags(response.choices?.[0]?.message?.content ?? "");
     if (!summary) throw new Error("The model returned an empty summary; the conversation was not compacted.");
     return summary;
   }

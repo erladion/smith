@@ -128,7 +128,8 @@ Servers you use regularly go in `~/.config/agent/config.json`:
 At the top level, next to `endpoints`, `"maxSteps": 120` sets how many model calls one message
 may use before the agent stops and asks you (default 50; `--max-steps` overrides it for one run).
 Raise it for long autonomous tasks; when it stops, sending "continue" gives it a fresh budget.
-`"toolLog": false` turns off the [tool log](#tool-log).
+`"toolLog": false` turns off the [tool log](#tool-log), and `"theme": "plain"` turns off the
+[Matrix touches](#in-the-tui) (`"codeStream": false` only the idle stream in the status line).
 
 `--endpoints` lists them, `-e <name>` starts on one, and `/endpoint` switches mid-conversation.
 Without `-e`, the agent starts on the resumed session's endpoint, else the one used last, else
@@ -137,6 +138,20 @@ then are `AGENT_API_KEY`/`OPENAI_API_KEY` used: keys from your environment are n
 configured endpoint they weren't set for. The file is only read, never written.
 
 ## In the TUI
+
+The default `matrix` theme adds some Agent Smith:
+
+- a second of digital rain at startup that settles into "AGENT SMITH" (any key skips it)
+- a green katakana spinner, and a strip of rain while the conversation is being compacted
+- a slow stream of glyphs at the right end of the status line while the agent is idle
+  (`"codeStream": false` turns off just that; some terminals jump to the bottom on any output)
+- greetings that notice where you are: a new folder, a session resumed minutes later or after
+  weeks; a remark when you interrupt with esc; a farewell that counts long runs
+- and a command `/help` doesn't list. Take the red pill.
+
+`"theme": "plain"` in the config file turns all of it off. Animations are left out when colors are
+off (`NO_COLOR`) or the window is very small. The glyphs are half-width katakana, which terminals
+show with a fallback font if theirs lacks them.
 
 Type `/` and the commands appear under the input; each letter narrows the list (`/h` leaves
 `/help`). ↑/↓ pick one, Tab completes it, Enter runs it, Esc hides the list. After a command and a
@@ -320,7 +335,7 @@ src/core/skills.ts       skill discovery and SKILL.md headers
 src/core/diff.ts         line diffs (Myers) for approvals and the transcript
 src/core/undo.ts         per-turn file checkpoints for /undo
 src/tui/                 general terminal toolkit: renderer, keys, input editor, Markdown,
-                         pickers; it doesn't import the agent (a test keeps it that way)
+                         pickers, digital rain; it doesn't import the agent (a test keeps it that way)
 src/ui/app.ts            the agent's TUI: screen, keys, agent turns, slash commands
 src/ui/sessions.ts       /new, /sessions, /name, /open and the folder browser
 src/ui/connection.ts     /endpoint, /model, /reasoning

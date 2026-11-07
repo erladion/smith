@@ -34,7 +34,7 @@ export class SessionCommands {
     this.sessions.startNew(app.agent.model, app.server.name);
     const where = folder ? ` in ${tildify(app.project.cwd)}` : "";
     notes.unshift({ kind: "notice", level: "info", text: `Started a new session${where}. The previous one is ${previous}; /sessions lists this folder's sessions.` });
-    app.startOver(false, notes);
+    app.startOver({ resumed: false }, notes);
   }
 
   /**
@@ -166,7 +166,7 @@ export class SessionCommands {
       return app.print({ kind: "notice", level: "error", text: `Could not open session ${id}: ${(err as Error).message}` });
     }
     app.agent.loadConversation(opened.messages);
-    app.startOver(true, [...notes, ...historyToEntries(opened.messages, app.project.tools)]);
+    app.startOver({ resumed: true, lastUsed: opened.lastUsed }, [...notes, ...historyToEntries(opened.messages, app.project.tools)]);
 
     // Continue on the endpoint and model the session last used, when they're available.
     const { endpoint, model } = opened;

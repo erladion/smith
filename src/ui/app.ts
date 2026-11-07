@@ -6,19 +6,20 @@ import { LineEditor } from "../tui/editor.js";
 import { type Key, KeyReader } from "../tui/keys.js";
 import { markdownLines, safeSplit } from "../tui/markdown.js";
 import type { Picker } from "../tui/picker.js";
+import { codeStream, playRain, Rain } from "../tui/rain.js";
 import { InlineRenderer } from "../tui/renderer.js";
-import type { Line } from "../tui/style.js";
+import { colorsEnabled, type Line } from "../tui/style.js";
 import { prefixed, truncate, wrap } from "../tui/text.js";
 import { helpText } from "./commands.js";
 import { ConnectionCommands } from "./connection.js";
 import { formatDuration, turnSummary } from "./duration.js";
 import { box, DIM, type Entry, entryLines, REASONING } from "./entries.js";
-import { greeting } from "./greetings.js";
+import { greeting, INTERRUPTED } from "./greetings.js";
 import { historyToEntries } from "./replay.js";
 import { SessionCommands } from "./sessions.js";
 import { SuggestionList } from "./suggestions.js";
 import type { AgentHooks, ProjectView, TuiOptions, UiContext } from "./types.js";
-import { approvalBox, runningLabel, SPINNER, statusLine } from "./view.js";
+import { approvalBox, runningLabel, SPINNERS, statusLine } from "./view.js";
 
 interface Terminal {
   input: NodeJS.ReadStream;
@@ -26,6 +27,14 @@ interface Terminal {
 }
 
 const HELP = helpText();
+
+/** How the session on screen started, for the banner's greeting. */
+type Start = { resumed: false } | { resumed: true; lastUsed?: Date };
+
+/** Columns and rows of the rain shown while the conversation is compacted (matrix theme). */
+const STRIP = { cols: 22, rows: 3 };
+/** Spinner frames per step of the status line's code stream. */
+const STREAM_EVERY = 4;
 
 /**
  * The interactive terminal UI: a transcript above, a live region below.
@@ -56,13 +65,19 @@ export class TuiApp implements UiContext {
   private turn: { started: number; toolCalls: number; reason?: string } | null = null;
   /** Tools running right now (several when read-only tools run in parallel), by call id. */
   private readonly running = new Map<string, string>();
+  /** The conversation is being compacted; with the matrix theme, a strip of rain shows it. */
+  private compacting = false;
+  private strip: Rain | null = null;
+  /** A full-screen animation (/redpill) has the terminal: no drawing, no keys. */
+  private paused = false;
 
   /** Everything printed so far, to reprint at a new width after a resize. */
   private readonly transcript: Entry[] = [];
   private printedWidth = 0;
   private resizeTimer: NodeJS.Timeout | undefined;
+  /** Animation frames so far (spinner, code stream, rain strip), and the timer that advances them. */
   private frame = 0;
-  private spinner: NodeJS.Timeout | undefined;
+  private ticker: NodeJS.Timeout | undefined;
   private renderTimer: NodeJS.Timeout | undefined;
   private closed = false;
   private finished: () => void = () => {};
@@ -81,10 +96,11 @@ export class TuiApp implements UiContext {
   }
 
   /** Runs until the user quits. */
-  run(): Promise<void> {
+  async run(): Promise<void> {
     const { input, output } = this.term;
     input.setRawMode(true);
     input.setEncoding("utf8");
+    if (this.opts.theme === "matrix" && colorsEnabled()) await playRain(this.term, { title: "AGENT SMITH" });
     input.on("data", this.onData);
     input.resume();
     output.on("resize", this.onResize);
@@ -94,7 +110,7 @@ export class TuiApp implements UiContext {
     output.write("\x1b[?25l\x1b[?2004h\x1b[>1u");
     process.once("exit", this.restoreTerminal);
 
-    this.printBanner(this.opts.resumed.length > 0);
+    this.printBanner(this.opts.resumed.length > 0 ? { resumed: true, lastUsed: this.opts.resumedLastUsed } : { resumed: false });
     for (const text of this.opts.warnings) this.print({ kind: "notice", level: "warn", text });
     for (const entry of historyToEntries(this.opts.resumed, this.project.tools)) this.print(entry);
     this.refreshModels();
@@ -121,12 +137,12 @@ export class TuiApp implements UiContext {
     this.requestRender();
   }
 
-  startOver(resumed: boolean, entries: Entry[]): void {
+  startOver(start: Start, entries: Entry[]): void {
     this.renderer.reset();
     this.transcript.length = 0;
     this.live = null;
     this.context = null;
-    this.printBanner(resumed);
+    this.printBanner(start);
     for (const entry of entries) this.print(entry);
   }
 
@@ -150,25 +166,28 @@ export class TuiApp implements UiContext {
     }
   }
 
-  private printBanner(resumed: boolean): void {
+  private printBanner(start: Start): void {
     const { sandbox, sessions } = this.opts;
+    // A folder no other session has worked in gets its own welcome.
+    const context = start.resumed ? start : { resumed: false as const, newFolder: sessions.list().every((s) => s.id === sessions.currentId()) };
     this.print({
       kind: "banner",
       model: this.agent.model,
       server: this.server.label,
       cwd: this.project.cwd,
       session: sessions.currentName() ? `${sessions.currentName()} · ${sessions.currentId()}` : sessions.currentId(),
-      resumed,
+      resumed: start.resumed,
       sandbox: { active: sandbox.active, description: sandbox.describe() },
       instructions: this.project.instructions,
       skills: this.project.skills.map((s) => s.name),
-      greeting: greeting(resumed),
+      greeting: this.matrix ? greeting(context) : undefined,
     });
   }
 
   // ---- terminal plumbing ----
 
   private readonly onData = (data: string) => {
+    if (this.paused) return;
     for (const key of this.keys.feed(data)) {
       if (this.closed) return;
       this.onKey(key);
@@ -180,7 +199,7 @@ export class TuiApp implements UiContext {
     clearTimeout(this.resizeTimer);
     // Wait for dragging to settle, then reprint once.
     this.resizeTimer = setTimeout(() => {
-      if (this.closed) return;
+      if (this.closed || this.paused) return;
       if (this.width !== this.printedWidth) {
         this.renderer.reset();
         this.printedWidth = this.width;
@@ -200,7 +219,7 @@ export class TuiApp implements UiContext {
     this.closed = true;
     this.abort?.abort();
     this.approval?.resolve("deny");
-    clearInterval(this.spinner);
+    clearInterval(this.ticker);
     clearTimeout(this.renderTimer);
     clearTimeout(this.resizeTimer);
     this.renderer.finish();
@@ -210,6 +229,19 @@ export class TuiApp implements UiContext {
     this.term.output.removeListener("resize", this.onResize);
     this.term.input.pause();
     this.finished();
+  }
+
+  private get spinnerStyle() {
+    return SPINNERS[this.opts.theme];
+  }
+
+  private get matrix(): boolean {
+    return this.opts.theme === "matrix";
+  }
+
+  /** The idle stream of glyphs at the end of the status line. */
+  private get streaming(): boolean {
+    return this.matrix && this.opts.codeStream && colorsEnabled() && !this.busy;
   }
 
   private get width(): number {
@@ -226,17 +258,18 @@ export class TuiApp implements UiContext {
   }
 
   private render(): void {
-    if (this.closed) return;
-    // The spinner only needs a timer while it's on screen.
-    const spinning = Boolean(this.activity && !this.approval);
-    if (spinning && !this.spinner) {
-      this.spinner = setInterval(() => {
-        this.frame = (this.frame + 1) % SPINNER.length;
+    if (this.closed || this.paused) return;
+    // The animations only need a timer while one is on screen.
+    const animating = Boolean(this.activity && !this.approval) || this.streaming;
+    if (animating && !this.ticker) {
+      this.ticker = setInterval(() => {
+        this.frame++;
+        this.strip?.step();
         this.requestRender();
       }, 80);
-    } else if (!spinning && this.spinner) {
-      clearInterval(this.spinner);
-      this.spinner = undefined;
+    } else if (!animating && this.ticker) {
+      clearInterval(this.ticker);
+      this.ticker = undefined;
     }
     this.renderer.draw(this.liveLines());
   }
@@ -250,7 +283,20 @@ export class TuiApp implements UiContext {
     }
     if (this.activity && !this.approval) {
       const elapsed = this.turn ? ` · ${formatDuration(Date.now() - this.turn.started)}` : "";
-      lines.push([], truncate([{ text: SPINNER[this.frame]!, style: { color: "yellow" } }, { text: ` ${this.activity}${elapsed}`, style: DIM }], width));
+      if (this.compacting && this.matrix && colorsEnabled()) {
+        // A strip of rain, with the activity beside its middle row.
+        if (!this.strip) {
+          this.strip = new Rain(STRIP.cols, STRIP.rows, { title: "", frames: Infinity });
+          // Already raining when it appears.
+          for (let i = 0; i < 12; i++) this.strip.step();
+        }
+        const rain = this.strip.lines();
+        rain[1]!.push({ text: `  Purging old memories…${elapsed}`, style: DIM });
+        lines.push([], ...rain.map((line) => truncate(line, width)));
+      } else {
+        const { frames, color } = this.spinnerStyle;
+        lines.push([], truncate([{ text: frames[this.frame % frames.length]!, style: { color } }, { text: ` ${this.activity}${elapsed}`, style: DIM }], width));
+      }
     }
     if (this.approval) {
       lines.push([], ...approvalBox(this.approval, width, this.term.output.rows || 24));
@@ -278,6 +324,7 @@ export class TuiApp implements UiContext {
           sandbox: this.opts.sandbox,
           busy: this.busy,
           queueing: this.agentRunning,
+          filler: this.streaming ? (n) => codeStream(Math.floor(this.frame / STREAM_EVERY), n) : undefined,
         },
         width,
       ),
@@ -291,6 +338,7 @@ export class TuiApp implements UiContext {
     if (this.closed) return;
     switch (event.type) {
       case "delta":
+        this.setCompacting(false);
         this.activity = null;
         this.appendDelta(event.kind, event.text);
         break;
@@ -298,6 +346,7 @@ export class TuiApp implements UiContext {
         this.flushLive();
         break;
       case "tool_prepare":
+        this.setCompacting(false);
         this.flushLive();
         this.activity = `Preparing ${event.name}…`;
         break;
@@ -306,10 +355,12 @@ export class TuiApp implements UiContext {
         this.print({ kind: "user", text: event.text });
         break;
       case "tool_start":
+        this.setCompacting(false);
         this.running.set(event.id, `${event.name} ${event.summary}`);
         this.activity = runningLabel([...this.running.values()]);
         break;
       case "tool_end":
+        this.setCompacting(false);
         if (this.turn) this.turn.toolCalls++;
         this.running.delete(event.id);
         this.activity = runningLabel([...this.running.values()]);
@@ -319,6 +370,7 @@ export class TuiApp implements UiContext {
         this.context = { tokens: event.tokens, limit: event.limit };
         break;
       case "activity":
+        this.setCompacting(Boolean(event.compacting));
         // Progress from inside a tool (a sub-agent); say so when several run at once.
         this.activity = this.running.size > 1 ? `${this.running.size} in parallel · ${event.text}` : event.text;
         break;
@@ -451,7 +503,10 @@ export class TuiApp implements UiContext {
     await this.runBusy("Thinking…", (signal) => this.agent.send(text, signal));
     const turn = this.turn;
     this.turn = null;
-    if (turn && !this.closed) this.print({ kind: "meta", text: turnSummary(turn.reason, Date.now() - turn.started, turn.toolCalls) });
+    if (turn && !this.closed) {
+      this.print({ kind: "meta", text: turnSummary(turn.reason, Date.now() - turn.started, turn.toolCalls) });
+      if (turn.reason === "interrupted" && this.matrix) this.print({ kind: "quote", text: INTERRUPTED });
+    }
   }
 
   /** Runs a slash command; commands.ts lists them for /help and the suggestions. */
@@ -488,7 +543,11 @@ export class TuiApp implements UiContext {
       case "/skills":
         return this.listSkills();
       case "/compact":
+        this.setCompacting(true);
         return this.runBusy("Compacting…", (signal) => this.agent.compactNow(signal));
+      // Not listed in /help.
+      case "/redpill":
+        return this.redPill();
       default:
         return this.print({ kind: "notice", level: "error", text: `Unknown command ${command}. Type /help for the list.` });
     }
@@ -511,6 +570,7 @@ export class TuiApp implements UiContext {
       this.abort = null;
       this.activity = null;
       this.running.clear();
+      this.setCompacting(false);
       this.busy = false;
       // Messages the agent never got (interrupted, error, step limit) go back into the input.
       const undelivered = this.agent.takeQueued();
@@ -520,6 +580,26 @@ export class TuiApp implements UiContext {
         this.print({ kind: "notice", level: "warn", text: "Your queued message wasn't delivered, so it's back in the input box." });
       }
       this.requestRender();
+    }
+  }
+
+  private setCompacting(on: boolean): void {
+    this.compacting = on;
+    if (!on) this.strip = null;
+  }
+
+  /** Digital rain over the whole screen until a key is pressed. */
+  private async redPill(): Promise<void> {
+    if (!colorsEnabled()) return this.print({ kind: "notice", level: "info", text: "The Matrix needs colors, and NO_COLOR is set." });
+    this.paused = true;
+    clearInterval(this.ticker);
+    this.ticker = undefined;
+    try {
+      await playRain(this.term, { title: "", frames: Infinity });
+    } finally {
+      this.paused = false;
+      // The window may have been resized meanwhile: reprint if so, then redraw.
+      this.onResize();
     }
   }
 

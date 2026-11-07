@@ -38,6 +38,8 @@ const ConfigSchema = z.strictObject({
   maxSteps: z.number().int().min(1).max(10_000).optional().describe("Model calls allowed per message before the agent stops"),
   subagents: z.boolean().optional().describe("Give the model the task tool for read-only sub-agents (default true)"),
   toolLog: z.boolean().optional().describe("Log every tool call to ~/.local/share/agent/logs (default true)"),
+  theme: z.enum(["matrix", "plain"]).optional().describe("matrix: digital rain, katakana spinner and Agent Smith's lines (default); plain: none of it"),
+  codeStream: z.boolean().optional().describe("With the matrix theme, a stream of glyphs at the end of the status line while idle (default true)"),
   endpoints: z.record(z.string(), EndpointSchema).default({}),
 });
 
@@ -49,6 +51,9 @@ export interface Endpoint {
   contextSize?: number;
 }
 
+/** How the TUI looks: "matrix" adds digital rain at startup and a katakana spinner. */
+export type Theme = "matrix" | "plain";
+
 export interface Config {
   file: string;
   endpoints: Endpoint[];
@@ -59,6 +64,9 @@ export interface Config {
   subagents: boolean;
   /** Whether tool calls are logged to logs/<session>.jsonl. */
   toolLog: boolean;
+  theme: Theme;
+  /** Whether the matrix theme shows the idle stream of glyphs in the status line. */
+  codeStream: boolean;
   /** Problems worth telling the user about that don't stop the agent. */
   warnings: string[];
 }
@@ -88,7 +96,7 @@ export function loadConfig(file = configPath()): Config {
   try {
     raw = fs.readFileSync(file, "utf8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { file, endpoints: [], subagents: true, toolLog: true, warnings: [] };
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { file, endpoints: [], subagents: true, toolLog: true, theme: "matrix", codeStream: true, warnings: [] };
     throw err;
   }
 
@@ -121,5 +129,5 @@ export function loadConfig(file = configPath()): Config {
     warnings.push(`${file} contains API keys but other users can read it. Run: chmod 600 ${file}`);
   }
 
-  return { file, endpoints, defaultEndpoint: config.default, maxSteps: config.maxSteps, subagents: config.subagents ?? true, toolLog: config.toolLog ?? true, warnings };
+  return { file, endpoints, defaultEndpoint: config.default, maxSteps: config.maxSteps, subagents: config.subagents ?? true, toolLog: config.toolLog ?? true, theme: config.theme ?? "matrix", codeStream: config.codeStream ?? true, warnings };
 }

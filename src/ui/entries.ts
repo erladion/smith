@@ -27,7 +27,9 @@ export type Entry =
   | { kind: "tool"; name: string; summary: string; output: string; isError: boolean; diff?: DiffLine[] }
   | { kind: "notice"; level: NoticeLevel; text: string }
   /** Quiet information, e.g. how long a turn took. */
-  | { kind: "meta"; text: string };
+  | { kind: "meta"; text: string }
+  /** Agent Smith remarking on something, directly under the entry before it. */
+  | { kind: "quote"; text: string };
 
 export const DIM: Style = { dim: true };
 export const REASONING: Style = { dim: true, italic: true };
@@ -52,6 +54,8 @@ export function entryLines(entry: Entry, width: number): Line[] {
       return [[], ...toolLines(entry, width)];
     case "meta":
       return [[], ...wrap([{ text: entry.text, style: DIM }], width)];
+    case "quote":
+      return wrap([{ text: entry.text, style: { color: "green", italic: true } }], width);
   }
 }
 

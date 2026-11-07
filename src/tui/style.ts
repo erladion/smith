@@ -39,6 +39,10 @@ export function setColors(enabled: boolean): void {
   colors = enabled;
 }
 
+export function colorsEnabled(): boolean {
+  return colors;
+}
+
 function sgr(style: Style | undefined): string {
   if (!style) return "";
   const codes: number[] = [];

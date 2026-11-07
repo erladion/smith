@@ -23,7 +23,7 @@ import { TuiApp } from "./ui/app.js";
 import type { AgentHooks, AgentSettings, ProjectView } from "./ui/types.js";
 import { turnSummary } from "./ui/duration.js";
 import { shortPath } from "./ui/folders.js";
-import { FAREWELL } from "./ui/greetings.js";
+import { farewell } from "./ui/greetings.js";
 import { describeError } from "./core/errors.js";
 import { useSystemNetworkSettings } from "./core/network.js";
 import { ToolLog } from "./core/toollog.js";
@@ -189,6 +189,7 @@ async function main(): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error("The interactive UI needs a terminal. Use -p <prompt> for non-interactive runs.");
   }
+  const tuiStarted = Date.now();
   await new TuiApp({
     createAgent,
     server,
@@ -211,7 +212,7 @@ async function main(): Promise<void> {
       open: (id) => {
         const opened = Session.open(id);
         session = opened.session;
-        return { messages: opened.messages, model: session.model, endpoint: session.endpoint, cwd: session.cwd };
+        return { messages: opened.messages, model: session.model, endpoint: session.endpoint, cwd: session.cwd, lastUsed: session.lastUsed };
       },
       rename: (name) => session.rename(name),
       startNew: (model, endpoint) => {
@@ -228,6 +229,9 @@ async function main(): Promise<void> {
       },
     },
     resumed: history,
+    resumedLastUsed: resumed?.session.lastUsed,
+    theme: config.theme,
+    codeStream: config.codeStream,
     savePreferences: ({ server, model, reasoning }) => {
       if (model) session.recordModel(model, server.name);
       savePreferences({
@@ -238,7 +242,8 @@ async function main(): Promise<void> {
     },
   }).run();
   const resumeWith = session.name && !/\s/.test(session.name) ? session.name : session.id;
-  console.log(`${FAREWELL}\nSession ${session.name ? `"${session.name}" ` : ""}${session.id}. Resume with: agent --resume ${resumeWith}`);
+  const goodbye = config.theme === "matrix" ? `${farewell(Date.now() - tuiStarted)}\n` : "";
+  console.log(`${goodbye}Session ${session.name ? `"${session.name}" ` : ""}${session.id}. Resume with: agent --resume ${resumeWith}`);
 }
 
 interface Project {

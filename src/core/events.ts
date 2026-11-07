@@ -21,7 +21,7 @@ export type AgentEvent =
   | { type: "tool_end"; id: string; name: string; summary: string; output: string; isError: boolean; diff?: DiffLine[] }
   /** How full the context window is. `limit` is unknown for servers that don't report it. */
   | { type: "context"; tokens: number; limit?: number }
-  /** Background work worth showing in a status line, e.g. compaction. */
-  | { type: "activity"; text: string }
+  /** Background work worth showing in a status line; `compacting` while the conversation is being summarized. */
+  | { type: "activity"; text: string; compacting?: boolean }
   | { type: "notice"; level: NoticeLevel; text: string }
   | { type: "done"; reason: DoneReason };

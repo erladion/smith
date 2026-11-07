@@ -1,12 +1,17 @@
 import type { ApprovalRequest } from "../core/agent.js";
+import type { Theme } from "../core/config.js";
 import type { Sandbox } from "../core/sandbox.js";
-import type { Line } from "../tui/style.js";
-import { truncate, wrap } from "../tui/text.js";
+import type { Color, Line } from "../tui/style.js";
+import { lineWidth, truncate, wrap } from "../tui/text.js";
 import { box, DIM, diffView } from "./entries.js";
 
 // Parts of the live region that are drawn from plain data.
 
-export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+export const SPINNERS: Record<Theme, { frames: string[]; color: Color }> = {
+  plain: { frames: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], color: "yellow" },
+  // Half-width katakana, one column wide like the braille dots.
+  matrix: { frames: [..."ﾊﾐﾋｰｳｼﾅﾓﾆｻﾜﾂｵﾘｱﾎﾃﾏｹﾒｴｶｷﾑﾕﾗｾﾈｽﾀﾇﾍ"], color: "green" },
+};
 
 /** The "Allow bash?" box, with the change previewed in as many of the screen's `rows` as fit. */
 export function approvalBox(req: ApprovalRequest, width: number, rows: number): Line[] {
@@ -46,6 +51,8 @@ export interface Status {
   busy: boolean;
   /** An agent turn is running, so enter queues a message. */
   queueing: boolean;
+  /** Fills spare room at the right end with this many columns of something, e.g. a code stream. */
+  filler?: (width: number) => string;
 }
 
 /** The bottom line: endpoint, model, reasoning, context use, sandbox, and what keys do now. */
@@ -60,6 +67,8 @@ export function statusLine(status: Status, width: number): Line {
   if (status.busy) parts.push(status.queueing ? "esc to interrupt · enter queues" : "esc to interrupt");
   const line: Line = sandbox.active ? [] : [{ text: "unsandboxed · ", style: { color: "red" } }];
   line.push({ text: parts.filter(Boolean).join(" · "), style: DIM });
+  const room = Math.min(24, width - lineWidth(line) - 3);
+  if (status.filler && room >= 6) line.push({ text: " ".repeat(width - lineWidth(line) - room) }, { text: status.filler(room), style: { color: "green", dim: true } });
   return truncate(line, width);
 }
 

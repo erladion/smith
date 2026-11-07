@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { LineEditor } from "../src/tui/editor.js";
 import { box } from "../src/ui/entries.js";
-import { greeting } from "../src/ui/greetings.js";
+import { farewell, greeting } from "../src/ui/greetings.js";
 import { KeyReader } from "../src/tui/keys.js";
 import { inline, markdownLines, safeSplit } from "../src/tui/markdown.js";
 import { Picker } from "../src/tui/picker.js";
@@ -10,6 +10,7 @@ import { isGitRepo, listFolders, shortPath } from "../src/ui/folders.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { codeStream, Rain } from "../src/tui/rain.js";
 import { InlineRenderer } from "../src/tui/renderer.js";
 import { type Line, setColors, toAnsi } from "../src/tui/style.js";
 import { lineWidth, sanitize, textWidth, truncate, wrap } from "../src/tui/text.js";
@@ -254,12 +255,26 @@ describe("renderer", () => {
   });
 });
 
-test("Agent Smith greets Mr. Anderson, and says we meet again on a resumed session", () => {
+test("Agent Smith greets Mr. Anderson, fitting how the session started", () => {
+  const now = Date.parse("2026-11-07T12:00:00Z");
+  const ago = (ms: number) => new Date(now - ms);
   for (const r of [0, 0.5, 0.999]) {
-    assert.match(greeting(false, () => r), /Mr\. Anderson/);
-    assert.match(greeting(true, () => r), /Mr\. Anderson/);
+    for (const context of [{ resumed: false as const }, { resumed: false as const, newFolder: true }, { resumed: true as const }, { resumed: true as const, lastUsed: ago(60_000) }, { resumed: true as const, lastUsed: ago(40 * 86_400_000) }]) {
+      assert.match(greeting(context, () => r, now), /Mr\. Anderson/);
+    }
   }
-  assert.equal(greeting(true, () => 0), "We meet again, Mr. Anderson.");
+  assert.equal(greeting({ resumed: true }, () => 0, now), "We meet again, Mr. Anderson.");
+  assert.equal(greeting({ resumed: true, lastUsed: ago(3 * 3_600_000) }, () => 0, now), "We meet again, Mr. Anderson.");
+  assert.equal(greeting({ resumed: true, lastUsed: ago(5 * 60_000) }, () => 0, now), "Back so soon, Mr. Anderson?");
+  assert.match(greeting({ resumed: true, lastUsed: ago(30 * 86_400_000) }, () => 0, now), /long time/);
+  assert.match(greeting({ resumed: false, newFolder: true }, () => 0, now), /new place/);
+});
+
+test("the farewell counts long runs", () => {
+  assert.equal(farewell(20 * 60_000), "Goodbye, Mr. Anderson.");
+  assert.equal(farewell(70 * 60_000), "An hour, Mr. Anderson. It is inevitable. Goodbye.");
+  assert.equal(farewell(3.5 * 3_600_000), "Three hours, Mr. Anderson. It is inevitable. Goodbye.");
+  assert.equal(farewell(30 * 3_600_000), "30 hours, Mr. Anderson. It is inevitable. Goodbye.");
 });
 
 test("durations and turn summaries", async () => {
@@ -322,5 +337,79 @@ describe("command suggestions", async () => {
     assert.deepEqual(texts("fix the bug"), []);
     assert.deepEqual(texts("/help\nmore"), []);
     for (const c of COMMANDS) assert.match(helpText(), new RegExp(c.name.replace("/", "\\/")));
+  });
+});
+
+describe("digital rain", () => {
+  // A seeded generator, so a failure can be replayed.
+  const seeded = (seed: number) => () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const rows = (frame: string) =>
+    frame
+      .split(/\x1b\[\d+;1H/)
+      .slice(1)
+      .map((row) => row.replace(/\x1b\[[\d;]*m/g, ""));
+
+  test("every frame fills the screen exactly, one column per glyph", () => {
+    const rain = new Rain(60, 20, { title: "AGENT SMITH", random: seeded(1) });
+    while (!rain.done) {
+      rain.step();
+      const shown = rows(rain.render());
+      assert.equal(shown.length, 20);
+      for (const row of shown) assert.equal(textWidth(row), 60);
+    }
+  });
+
+  test("the title appears gradually and is complete, centered, at the end", () => {
+    const rain = new Rain(61, 21, { title: "AGENT SMITH", frames: 30, holdFrames: 5, random: seeded(7) });
+    assert.equal(rain.shownTitle.trim(), "");
+    for (let i = 0; i < 30; i++) rain.step();
+    assert.equal(rain.shownTitle, "AGENT SMITH");
+    assert.ok(!rain.done, "the finished title is held for a moment");
+    for (let i = 0; i < 5; i++) rain.step();
+    assert.ok(rain.done);
+    const middle = rows(rain.render())[10]!;
+    assert.equal(middle.indexOf("AGENT SMITH"), 25);
+  });
+});
+
+describe("matrix extras", () => {
+  test("rain as lines: an endless strip, every line exactly as wide as asked", () => {
+    const strip = new Rain(22, 3, { title: "", frames: Infinity });
+    let lit = 0;
+    for (let i = 0; i < 300; i++) {
+      strip.step();
+      const lines = strip.lines();
+      assert.equal(lines.length, 3);
+      for (const line of lines) {
+        assert.equal(lineWidth(line), 22);
+        lit += line.filter((s) => s.style).length;
+      }
+    }
+    assert.ok(!strip.done, "an endless rain never finishes");
+    assert.ok(lit > 0, "it rains");
+  });
+
+  test("the code stream scrolls one column to the left per step", () => {
+    const now = codeStream(41, 20);
+    assert.equal(textWidth(now), 20);
+    assert.equal(codeStream(42, 19), now.slice(1));
+    assert.match(now, / /, "it has gaps");
+  });
+
+  test("the status line puts the code stream in spare room at its right end", async () => {
+    const { statusLine } = await import("../src/ui/view.js");
+    const sandbox = { active: true, network: false } as never;
+    const status = { endpoint: "local", model: "m", reasoning: "default", context: null, sandbox, busy: false, queueing: false };
+    const plain = statusLine(status, 80);
+    const streamed = statusLine({ ...status, filler: (n) => "ｱ".repeat(n) }, 80);
+    assert.equal(lineWidth(streamed), 80);
+    assert.ok(streamed.map((s) => s.text).join("").endsWith("ｱ".repeat(24)));
+    assert.deepEqual(statusLine({ ...status, filler: (n) => "ｱ".repeat(n) }, 40), statusLine(status, 40), "no room, no stream");
+    assert.ok(lineWidth(plain) < 80);
   });
 });

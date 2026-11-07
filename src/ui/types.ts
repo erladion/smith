@@ -1,6 +1,6 @@
 import type OpenAI from "openai";
 import type { Agent, ApprovalDecision, ApprovalRequest } from "../core/agent.js";
-import type { Endpoint } from "../core/config.js";
+import type { Endpoint, Theme } from "../core/config.js";
 import type { AgentEvent } from "../core/events.js";
 import type { Message } from "../core/history.js";
 import type { ReasoningLevel } from "../core/reasoning.js";
@@ -29,8 +29,8 @@ export interface SessionControl {
   currentName(): string | undefined;
   /** This folder's sessions (or every folder's), newest first. */
   list(everywhere?: boolean): SessionInfo[];
-  /** Makes `id` the session being recorded and returns its conversation, folder and last model. */
-  open(id: string): { messages: Message[]; model: string; endpoint?: string; cwd: string };
+  /** Makes `id` the session being recorded and returns its conversation, folder, last model and when it was last used. */
+  open(id: string): { messages: Message[]; model: string; endpoint?: string; cwd: string; lastUsed?: Date };
   /** Names the current session. */
   rename(name: string): void;
   /** Starts recording to a new session (its file appears with the first message). */
@@ -78,8 +78,13 @@ export interface TuiOptions {
   sessions: SessionControl;
   /** Conversation restored from a saved session, shown before the prompt. */
   resumed: Message[];
+  /** When the resumed session was last used, for the greeting. */
+  resumedLastUsed?: Date;
   /** Remembers the user's endpoint, model and reasoning choices for next time. */
   savePreferences: (update: PreferenceUpdate) => void;
+  theme: Theme;
+  /** With the matrix theme: the idle stream of glyphs in the status line. */
+  codeStream: boolean;
 }
 
 /**
@@ -94,8 +99,8 @@ export interface UiContext {
   project: ProjectView;
   /** Adds an entry to the transcript. */
   print(entry: Entry): void;
-  /** Clears the screen and starts a fresh transcript (new or switched session). */
-  startOver(resumed: boolean, entries: Entry[]): void;
+  /** Clears the screen and starts a fresh transcript: a new session, or a resumed one last used at `lastUsed`. */
+  startOver(start: { resumed: false } | { resumed: true; lastUsed?: Date }, entries: Entry[]): void;
   /** Shows a picker; `onPick` gets the value of the item chosen (not called on esc). */
   openPicker(picker: Picker, onPick: (value: string) => void): void;
   /** Shows a spinner while `work` runs, printing any error. */

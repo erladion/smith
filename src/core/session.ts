@@ -57,6 +57,8 @@ export class Session {
   private currentModel: string;
   private currentEndpoint: string | undefined;
   private currentName: string | undefined;
+  /** For an opened session: when it was last written to, before this run. */
+  lastUsed: Date | undefined;
 
   private constructor(
     readonly id: string,
@@ -104,6 +106,7 @@ export class Session {
     if (!fs.existsSync(file)) throw new Error(`No session ${id} in ${sessionsDir()}`);
     const { meta, messages, model, endpoint, name } = readLog(file);
     const session = new Session(meta.id, file, meta);
+    session.lastUsed = fs.statSync(file).mtime;
     session.currentModel = model;
     session.currentEndpoint = endpoint;
     session.currentName = name;
