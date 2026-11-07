@@ -1,101 +1,24 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import type OpenAI from "openai";
 import type { Agent, ApprovalDecision, ApprovalRequest } from "../core/agent.js";
-import { type Endpoint, EXAMPLE_CONFIG } from "../core/config.js";
 import { describeError } from "../core/errors.js";
 import type { AgentEvent, BlockKind } from "../core/events.js";
-import type { Message } from "../core/history.js";
-import { isReasoningLevel, REASONING_HINTS, REASONING_LEVELS, type ReasoningLevel } from "../core/reasoning.js";
-import type { Sandbox } from "../core/sandbox.js";
-import type { SessionInfo } from "../core/session.js";
-import { Server } from "../core/server.js";
-import type { ToolDef } from "../core/tool.js";
-import { LineEditor } from "./editor.js";
-import { box, DIM, diffView, type Entry, entryLines, REASONING } from "./entries.js";
-import { type Key, KeyReader } from "./keys.js";
-import { markdownLines, safeSplit } from "./markdown.js";
-import { Picker } from "./picker.js";
-import { InlineRenderer } from "./renderer.js";
-import { isGitRepo, listFolders, shortPath, tildify } from "./folders.js";
+import type { Server } from "../core/server.js";
+import { LineEditor } from "../tui/editor.js";
+import { type Key, KeyReader } from "../tui/keys.js";
+import { markdownLines, safeSplit } from "../tui/markdown.js";
+import type { Picker } from "../tui/picker.js";
+import { InlineRenderer } from "../tui/renderer.js";
+import type { Line } from "../tui/style.js";
+import { prefixed, truncate, wrap } from "../tui/text.js";
+import { helpText } from "./commands.js";
+import { ConnectionCommands } from "./connection.js";
 import { formatDuration, turnSummary } from "./duration.js";
+import { box, DIM, type Entry, entryLines, REASONING } from "./entries.js";
 import { greeting } from "./greetings.js";
-import { helpText, type Suggestion, suggest } from "./commands.js";
 import { historyToEntries } from "./replay.js";
-import type { Line } from "./style.js";
-import { prefixed, truncate, wrap } from "./text.js";
-
-export interface AgentHooks {
-  onEvent: (event: AgentEvent) => void;
-  approve: (req: ApprovalRequest) => Promise<ApprovalDecision>;
-}
-
-export interface PreferenceUpdate {
-  server: Server;
-  model?: string;
-  reasoning?: ReasoningLevel;
-}
-
-/** Lets the UI list, open and start sessions; the CLI owns which one is recorded to. */
-export interface SessionControl {
-  currentId(): string;
-  /** The name given with /name, if any. */
-  currentName(): string | undefined;
-  /** This folder's sessions (or every folder's), newest first. */
-  list(everywhere?: boolean): SessionInfo[];
-  /** Makes `id` the session being recorded and returns its conversation, folder and last model. */
-  open(id: string): { messages: Message[]; model: string; endpoint?: string; cwd: string };
-  /** Names the current session. */
-  rename(name: string): void;
-  /** Starts recording to a new session (its file appears with the first message). */
-  startNew(model: string, endpoint: string | undefined): void;
-  /** Folders with saved sessions, most recently used first. */
-  recentProjects(): { cwd: string; sessions: number; updated: Date }[];
-}
-
-/** Settings carried over when the agent is recreated for another project. */
-export interface AgentSettings {
-  client: OpenAI;
-  model: string;
-  reasoning: ReasoningLevel;
-  contextSize: number | undefined;
-}
-
-/** The folder being worked in, and what was loaded for it. */
-export interface ProjectView {
-  cwd: string;
-  /** Instruction files in use, for the banner. */
-  instructions: string[];
-  /** Skills available, for the banner and /skills. */
-  skills: { name: string; description: string }[];
-  tools: ToolDef[];
-  /** Problems found while loading (e.g. a skill without a description). */
-  warnings: string[];
-}
-
-export interface TuiOptions {
-  /** Creates the agent for the current project; with `current`, carrying over those settings. */
-  createAgent: (hooks: AgentHooks, current?: AgentSettings) => Agent;
-  project: ProjectView;
-  /** Makes another folder the project (/new <folder>). Throws if it isn't a folder. */
-  switchProject: (folder: string) => ProjectView;
-  /** The server the agent starts on. */
-  server: Server;
-  /** Endpoints from the config file, for /endpoint. */
-  endpoints: Endpoint[];
-  configFile: string;
-  /** Problems found while loading the config, shown at startup. */
-  warnings: string[];
-  /** The model last used on a server, if remembered. */
-  rememberedModel: (baseURL: string) => string | undefined;
-  sandbox: Sandbox;
-  sessions: SessionControl;
-  /** Conversation restored from a saved session, shown before the prompt. */
-  resumed: Message[];
-  /** Remembers the user's endpoint, model and reasoning choices for next time. */
-  savePreferences: (update: PreferenceUpdate) => void;
-}
+import { SessionCommands } from "./sessions.js";
+import { SuggestionList } from "./suggestions.js";
+import type { AgentHooks, ProjectView, TuiOptions, UiContext } from "./types.js";
+import { approvalBox, runningLabel, SPINNER, statusLine } from "./view.js";
 
 interface Terminal {
   input: NodeJS.ReadStream;
@@ -104,43 +27,33 @@ interface Terminal {
 
 const HELP = helpText();
 
-/** "just now", "5 min ago", "3 h ago", "yesterday", or a date. */
-function ago(date: Date): string {
-  const minutes = Math.round((Date.now() - date.getTime()) / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} h ago`;
-  if (hours < 48) return "yesterday";
-  return date.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
-}
-
-const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-/** The interactive terminal UI: a transcript above, a live region below. */
-export class TuiApp {
+/**
+ * The interactive terminal UI: a transcript above, a live region below.
+ * This class runs the screen, the keys and agent turns; the commands that
+ * switch session, project, endpoint or model are in sessions.ts and
+ * connection.ts, and work through the UiContext it implements.
+ */
+export class TuiApp implements UiContext {
   private readonly renderer: InlineRenderer;
   private readonly keys = new KeyReader();
   private readonly editor = new LineEditor();
-  private agent: Agent;
-  private project: ProjectView;
-  private readonly hooks: AgentHooks;
-  private server: Server;
+  private readonly suggestions = new SuggestionList();
+  private readonly connection: ConnectionCommands;
+  private readonly sessions: SessionCommands;
+  readonly hooks: AgentHooks;
+  agent: Agent;
+  project: ProjectView;
+  server: Server;
 
   private live: { kind: BlockKind; text: string } | null = null;
   private activity: string | null = null;
   private approval: (ApprovalRequest & { resolve: (d: ApprovalDecision) => void }) | null = null;
-  private picker: { kind: "endpoint" | "model" | "reasoning" | "session" | "folder"; picker: Picker } | null = null;
+  private picker: { picker: Picker; onPick: (value: string) => void } | null = null;
   private busy = false;
   private abort: AbortController | null = null;
   private context: { tokens: number; limit?: number } | null = null;
   /** The running turn: when it started, how many tools it ran, how it ended. */
   private turn: { started: number; toolCalls: number; reason?: string } | null = null;
-  /** The highlighted entry in the command suggestions, and input for which they were dismissed with esc. */
-  private suggestionIndex = 0;
-  private dismissedFor: string | null = null;
-  /** Model ids the server listed, for completing /model. */
-  private knownModels: string[] = [];
   /** Tools running right now (several when read-only tools run in parallel), by call id. */
   private readonly running = new Map<string, string>();
 
@@ -155,7 +68,7 @@ export class TuiApp {
   private finished: () => void = () => {};
 
   constructor(
-    private readonly opts: TuiOptions,
+    readonly opts: TuiOptions,
     private readonly term: Terminal = { input: process.stdin, output: process.stdout },
   ) {
     this.server = opts.server;
@@ -163,6 +76,8 @@ export class TuiApp {
     this.project = opts.project;
     this.hooks = { onEvent: (e) => this.onEvent(e), approve: (r) => this.approve(r) };
     this.agent = opts.createAgent(this.hooks);
+    this.connection = new ConnectionCommands(this);
+    this.sessions = new SessionCommands(this, this.connection);
   }
 
   /** Runs until the user quits. */
@@ -188,42 +103,67 @@ export class TuiApp {
     return new Promise((resolve) => (this.finished = resolve));
   }
 
-  /** Fetches the server's model list in the background, for completing /model. */
-  private refreshModels(): void {
+  // ---- UiContext ----
+
+  refreshModels(): void {
     this.server
       .listModels()
       .then((models) => {
-        this.knownModels = models.map((m) => m.id);
+        this.suggestions.models = models.map((m) => m.id);
       })
       .catch(() => {});
   }
 
-  private printBanner(resumed: boolean): void {
-    const { sandbox } = this.opts;
-    this.print({
-      kind: "banner",
-      model: this.agent.model,
-      server: this.server.label,
-      cwd: this.project.cwd,
-      session: this.opts.sessions.currentName()
-        ? `${this.opts.sessions.currentName()} · ${this.opts.sessions.currentId()}`
-        : this.opts.sessions.currentId(),
-      resumed,
-      sandbox: { active: sandbox.active, description: sandbox.describe() },
-      instructions: this.project.instructions,
-      skills: this.project.skills.map((s) => s.name),
-      greeting: greeting(resumed),
-    });
+  print(entry: Entry): void {
+    this.transcript.push(entry);
+    this.printedWidth = this.width;
+    this.renderer.print(entryLines(entry, this.width));
+    this.requestRender();
   }
 
-  /** Clears the screen and starts a fresh transcript (new or switched session). */
-  private startOver(resumed: boolean, entries: Entry[]): void {
+  startOver(resumed: boolean, entries: Entry[]): void {
     this.renderer.reset();
     this.transcript.length = 0;
     this.live = null;
     this.context = null;
     this.printBanner(resumed);
     for (const entry of entries) this.print(entry);
+  }
+
+  openPicker(picker: Picker, onPick: (value: string) => void): void {
+    this.picker = { picker, onPick };
+    this.requestRender();
+  }
+
+  async withActivity(activity: string, work: () => Promise<void>): Promise<void> {
+    this.busy = true;
+    this.activity = activity;
+    this.requestRender();
+    try {
+      await work();
+    } catch (err) {
+      this.print({ kind: "notice", level: "error", text: describeError(err, this.server.baseURL) });
+    } finally {
+      this.activity = null;
+      this.busy = false;
+      this.requestRender();
+    }
+  }
+
+  private printBanner(resumed: boolean): void {
+    const { sandbox, sessions } = this.opts;
+    this.print({
+      kind: "banner",
+      model: this.agent.model,
+      server: this.server.label,
+      cwd: this.project.cwd,
+      session: sessions.currentName() ? `${sessions.currentName()} · ${sessions.currentId()}` : sessions.currentId(),
+      resumed,
+      sandbox: { active: sandbox.active, description: sandbox.describe() },
+      instructions: this.project.instructions,
+      skills: this.project.skills.map((s) => s.name),
+      greeting: greeting(resumed),
+    });
   }
 
   // ---- terminal plumbing ----
@@ -276,13 +216,6 @@ export class TuiApp {
     return Math.max(20, this.term.output.columns || 80);
   }
 
-  private print(entry: Entry): void {
-    this.transcript.push(entry);
-    this.printedWidth = this.width;
-    this.renderer.print(entryLines(entry, this.width));
-    this.requestRender();
-  }
-
   /** Redraws soon; many events in a burst (streaming) become one redraw. */
   private requestRender(): void {
     if (this.closed || this.renderTimer) return;
@@ -320,7 +253,7 @@ export class TuiApp {
       lines.push([], truncate([{ text: SPINNER[this.frame]!, style: { color: "yellow" } }, { text: ` ${this.activity}${elapsed}`, style: DIM }], width));
     }
     if (this.approval) {
-      lines.push([], ...this.approvalBox(this.approval, width));
+      lines.push([], ...approvalBox(this.approval, width, this.term.output.rows || 24));
     } else if (this.picker) {
       lines.push([], ...box(this.picker.picker.lines(), "cyan", width));
     } else if (!this.busy || this.agentRunning) {
@@ -333,55 +266,23 @@ export class TuiApp {
       const placeholder = this.busy ? "Type to add to what the agent is doing (enter queues it)" : "Ask for something, or /help";
       const prompt = prefixed([{ text: "› ", style: { color: "cyan" } }], [{ text: "  " }], this.editor.render(placeholder), width - 4);
       lines.push([], ...box(prompt, "gray", width, true));
-      lines.push(...this.suggestionLines(width));
+      lines.push(...this.suggestions.lines(this.currentSuggestions(), width));
     }
-    lines.push(this.statusLine(width));
+    lines.push(
+      statusLine(
+        {
+          endpoint: this.server.name,
+          model: this.agent.model,
+          reasoning: this.agent.reasoning,
+          context: this.context,
+          sandbox: this.opts.sandbox,
+          busy: this.busy,
+          queueing: this.agentRunning,
+        },
+        width,
+      ),
+    );
     return lines;
-  }
-
-  private approvalBox(req: ApprovalRequest, width: number): Line[] {
-    const content: Line[] = [[{ text: `Allow ${req.tool}?`, style: { bold: true } }]];
-    const summary = wrap([{ text: req.summary }], width - 4);
-    content.push(...summary.slice(0, 12));
-    if (req.note) content.push([{ text: req.note, style: { color: "yellow" } }]);
-    if (summary.length > 12) content.push([{ text: `… ${summary.length - 12} more lines`, style: DIM }]);
-    if (req.preview) {
-      // Leave room for the rest of the screen, but show as much of the change as fits.
-      const room = Math.max(6, (this.term.output.rows || 24) - content.length - 10);
-      content.push([], ...diffView(req.preview, width - 4, room), []);
-    }
-    if (req.sandbox) {
-      content.push([{ text: `${req.sandbox.active ? "✓" : "⚠"} ${req.sandbox.description}`, style: { color: req.sandbox.active ? "green" : "red" } }]);
-    }
-    content.push([
-      { text: "y", style: { color: "green" } },
-      { text: " yes · ", style: DIM },
-      { text: "a", style: { color: "green" } },
-      { text: ` always allow ${req.tool} this session · `, style: DIM },
-      { text: "n", style: { color: "red" } },
-      { text: " no · ", style: DIM },
-      { text: "esc", style: { color: "red" } },
-      { text: " no and interrupt", style: DIM },
-    ]);
-    return box(content, "yellow", width, true);
-  }
-
-  private statusLine(width: number): Line {
-    const k = (n: number) => (n >= 1024 ? `${Math.round(n / 1024)}k` : String(n));
-    const parts = [this.server.name, this.agent.model, `reasoning ${this.agent.reasoning}`];
-    if (this.context) {
-      parts.push(
-        this.context.limit
-          ? `${Math.round((100 * this.context.tokens) / this.context.limit)}% of ${k(this.context.limit)} context`
-          : `${k(this.context.tokens)} tokens`,
-      );
-    }
-    const { sandbox } = this.opts;
-    if (sandbox.active) parts.push(`sandbox, net ${sandbox.network ? "on" : "off"}`);
-    if (this.busy) parts.push(this.agentRunning ? "esc to interrupt · enter queues" : "esc to interrupt");
-    const line: Line = sandbox.active ? [] : [{ text: "unsandboxed · ", style: { color: "red" } }];
-    line.push({ text: parts.filter(Boolean).join(" · "), style: DIM });
-    return truncate(line, width);
   }
 
   // ---- agent events ----
@@ -406,12 +307,12 @@ export class TuiApp {
         break;
       case "tool_start":
         this.running.set(event.id, `${event.name} ${event.summary}`);
-        this.activity = this.runningLabel();
+        this.activity = runningLabel([...this.running.values()]);
         break;
       case "tool_end":
         if (this.turn) this.turn.toolCalls++;
         this.running.delete(event.id);
-        this.activity = this.runningLabel();
+        this.activity = runningLabel([...this.running.values()]);
         this.print({ kind: "tool", name: event.name, summary: event.summary, output: event.output, isError: event.isError, diff: event.diff });
         break;
       case "context":
@@ -430,74 +331,6 @@ export class TuiApp {
         break;
     }
     this.requestRender();
-  }
-
-  /** Command suggestions for what's in the input, unless dismissed or something else has the keys. */
-  private suggestions(): Suggestion[] {
-    if (this.busy || this.approval || this.picker) return [];
-    const value = this.editor.value;
-    if (value === this.dismissedFor) return [];
-    return suggest(value, {
-      cwd: this.project.cwd,
-      endpoints: this.opts.endpoints.map((e) => e.name),
-      models: this.knownModels,
-    });
-  }
-
-  /** Tab: fill in the suggestion; a command that takes an argument gets a space, so its completions show. */
-  private completeSuggestion(s: Suggestion): void {
-    const command = !s.text.includes(" ");
-    const takesArgs = command && /[[|]/.test(s.label);
-    this.editor.setValue(s.text + (takesArgs ? " " : ""));
-    this.suggestionIndex = 0;
-  }
-
-  private suggestionLines(width: number): Line[] {
-    const items = this.suggestions();
-    if (items.length === 0) return [];
-    const max = 8;
-    const at = Math.min(this.suggestionIndex, items.length - 1);
-    const start = Math.min(Math.max(0, at - Math.floor(max / 2)), Math.max(0, items.length - max));
-    const labelWidth = Math.min(28, Math.max(...items.map((i) => i.label.length)));
-    const lines = items.slice(start, start + max).map((item, i): Line => {
-      const selected = start + i === at;
-      return truncate(
-        [
-          { text: selected ? " › " : "   ", style: { color: "cyan" } },
-          { text: item.label.padEnd(labelWidth), style: selected ? { color: "cyan", bold: true } : undefined },
-          { text: item.hint ? `  ${item.hint}` : "", style: DIM },
-        ],
-        width,
-      );
-    });
-    const more = items.length - (start + max);
-    lines.push([{ text: `   ${more > 0 ? `${more} more · ` : ""}tab completes · enter runs · esc hides`, style: DIM }]);
-    return lines;
-  }
-
-  /** The spinner text for the tools in flight: one tool, or how many run in parallel. */
-  private runningLabel(): string {
-    const labels = [...this.running.values()];
-    if (labels.length === 0) return "Thinking…";
-    if (labels.length === 1) return labels[0]!;
-    return `${labels.length} tools in parallel: ${labels.map((l) => l.split(" ")[0]).join(", ")}`;
-  }
-
-  /** Whether an agent turn is running (as opposed to e.g. switching model), so typing can be queued. */
-  private get agentRunning(): boolean {
-    return this.busy && this.abort !== null;
-  }
-
-  /** A message typed while the agent works: queued for its next step. */
-  private queueMessage(value: string): void {
-    const text = value.trim();
-    if (!text) return;
-    if (text.startsWith("/")) {
-      this.editor.setValue(value);
-      this.print({ kind: "notice", level: "warn", text: "Commands work once the agent is done. Your command is still in the input box." });
-      return;
-    }
-    this.agent.queue(text);
   }
 
   /**
@@ -535,6 +368,12 @@ export class TuiApp {
 
   // ---- keys ----
 
+  /** Command suggestions for the input, unless something else has the keys. */
+  private currentSuggestions() {
+    if (this.busy || this.approval || this.picker) return [];
+    return this.suggestions.items(this.editor.value, { cwd: this.project.cwd, endpoints: this.opts.endpoints.map((e) => e.name) });
+  }
+
   private onKey(key: Key): void {
     if (key.name === "char" && key.ctrl && key.text === "c") return this.exit();
 
@@ -551,9 +390,14 @@ export class TuiApp {
     }
 
     if (this.picker) {
-      const result = this.picker.picker.handle(key);
+      const open = this.picker;
+      const result = open.picker.handle(key);
       if (result === "cancel") this.picker = null;
-      else if (result) this.onPick(result.value);
+      else if (result) {
+        // Cleared first: choosing can open the next picker (the folder browser).
+        this.picker = null;
+        open.onPick(result.value);
+      }
       return;
     }
 
@@ -566,74 +410,41 @@ export class TuiApp {
     if (key.name === "char" && key.ctrl && key.text === "d" && !this.editor.value) return this.exit();
 
     // While command suggestions are showing, arrows pick one, tab completes it and enter runs it.
-    const suggestions = this.suggestions();
-    if (suggestions.length > 0 && !key.ctrl && !key.meta && !key.shift) {
-      const at = Math.min(this.suggestionIndex, suggestions.length - 1);
-      if (key.name === "up" || key.name === "down") {
-        this.suggestionIndex = (at + (key.name === "up" ? suggestions.length - 1 : 1)) % suggestions.length;
-        return;
-      }
-      if (key.name === "tab") return this.completeSuggestion(suggestions[at]!);
-      if (key.name === "return") {
-        this.editor.setValue(suggestions[at]!.text);
-        return void this.submit(this.editor.commit());
-      }
-      if (key.name === "escape") {
-        this.dismissedFor = this.editor.value;
-        return;
-      }
+    const handled = this.suggestions.handle(key, this.currentSuggestions(), this.editor.value, (value) => this.editor.setValue(value));
+    if (handled === "handled") return;
+    if (handled) {
+      this.editor.setValue(handled.run);
+      return void this.submit(this.editor.commit());
     }
 
     const before = this.editor.value;
     if (this.editor.handle(key) === "submit") void this.submit(this.editor.commit());
-    if (this.editor.value !== before) this.suggestionIndex = 0;
+    if (this.editor.value !== before) this.suggestions.reset();
   }
 
-  // ---- commands ----
+  // ---- turns and commands ----
+
+  /** Whether an agent turn is running (as opposed to e.g. switching model), so typing can be queued. */
+  private get agentRunning(): boolean {
+    return this.busy && this.abort !== null;
+  }
+
+  /** A message typed while the agent works: queued for its next step. */
+  private queueMessage(value: string): void {
+    const text = value.trim();
+    if (!text) return;
+    if (text.startsWith("/")) {
+      this.editor.setValue(value);
+      this.print({ kind: "notice", level: "warn", text: "Commands work once the agent is done. Your command is still in the input box." });
+      return;
+    }
+    this.agent.queue(text);
+  }
 
   private async submit(value: string): Promise<void> {
     const text = value.trim();
     if (!text) return;
-
-    if (text.startsWith("/")) {
-      const [command, ...rest] = text.split(/\s+/);
-      const arg = rest.join(" ");
-      switch (command) {
-        case "/exit":
-        case "/quit":
-          return this.exit();
-        case "/help":
-          return this.print({ kind: "notice", level: "info", text: HELP });
-        case "/new":
-        case "/clear":
-          return this.newSession(arg);
-        case "/sessions":
-        case "/resume":
-          return this.openSessionPicker(arg === "all");
-        case "/name":
-          return this.nameSession(arg);
-        case "/open":
-          return this.openProjectPicker();
-        case "/network":
-          return this.setNetwork(arg);
-        case "/undo":
-          return this.undo();
-        case "/skills":
-          return this.listSkills();
-        case "/compact":
-          return this.runBusy("Compacting…", (signal) => this.agent.compactNow(signal));
-        case "/endpoint":
-          return arg ? this.switchEndpoint(arg) : this.openEndpointPicker();
-        case "/model":
-          return arg ? this.switchModel(arg) : this.openModelPicker();
-        case "/reasoning":
-          if (!arg) return this.openReasoningPicker();
-          if (isReasoningLevel(arg)) return this.switchReasoning(arg);
-          return this.print({ kind: "notice", level: "error", text: `Unknown reasoning level "${arg}". Use one of: ${REASONING_LEVELS.join(", ")}.` });
-        default:
-          return this.print({ kind: "notice", level: "error", text: `Unknown command ${command}. Type /help for the list.` });
-      }
-    }
+    if (text.startsWith("/")) return this.runCommand(text);
 
     this.print({ kind: "user", text });
     this.turn = { started: Date.now(), toolCalls: 0 };
@@ -641,6 +452,46 @@ export class TuiApp {
     const turn = this.turn;
     this.turn = null;
     if (turn && !this.closed) this.print({ kind: "meta", text: turnSummary(turn.reason, Date.now() - turn.started, turn.toolCalls) });
+  }
+
+  /** Runs a slash command; commands.ts lists them for /help and the suggestions. */
+  private runCommand(text: string): void | Promise<void> {
+    const [command, ...rest] = text.split(/\s+/);
+    const arg = rest.join(" ");
+    const { sessions, connection } = this;
+    switch (command) {
+      case "/exit":
+      case "/quit":
+        return this.exit();
+      case "/help":
+        return this.print({ kind: "notice", level: "info", text: HELP });
+      case "/new":
+      case "/clear":
+        return sessions.newSession(arg);
+      case "/sessions":
+      case "/resume":
+        return sessions.openSessionPicker(arg === "all");
+      case "/name":
+        return sessions.nameSession(arg);
+      case "/open":
+        return sessions.openProjectPicker();
+      case "/endpoint":
+        return arg ? connection.switchEndpoint(arg) : connection.openEndpointPicker();
+      case "/model":
+        return arg ? connection.switchModel(arg) : connection.openModelPicker();
+      case "/reasoning":
+        return arg ? connection.setReasoning(arg) : connection.openReasoningPicker();
+      case "/network":
+        return this.setNetwork(arg);
+      case "/undo":
+        return this.undo();
+      case "/skills":
+        return this.listSkills();
+      case "/compact":
+        return this.runBusy("Compacting…", (signal) => this.agent.compactNow(signal));
+      default:
+        return this.print({ kind: "notice", level: "error", text: `Unknown command ${command}. Type /help for the list.` });
+    }
   }
 
   /** Runs agent work with the spinner on and esc wired to interrupt it. */
@@ -669,168 +520,6 @@ export class TuiApp {
         this.print({ kind: "notice", level: "warn", text: "Your queued message wasn't delivered, so it's back in the input box." });
       }
       this.requestRender();
-    }
-  }
-
-  /** Shows a spinner while `work` runs, without making it interruptible. */
-  private async withActivity(activity: string, work: () => Promise<void>): Promise<void> {
-    this.busy = true;
-    this.activity = activity;
-    this.requestRender();
-    try {
-      await work();
-    } catch (err) {
-      this.print({ kind: "notice", level: "error", text: describeError(err, this.server.baseURL) });
-    } finally {
-      this.activity = null;
-      this.busy = false;
-      this.requestRender();
-    }
-  }
-
-  /** Starts a new session, in another folder if one is given. */
-  private newSession(folder?: string): void {
-    const previous = this.opts.sessions.currentId();
-    const notes: Entry[] = [];
-    if (folder) {
-      const entered = this.enterProject(folder);
-      if (!entered) return;
-      notes.push(...entered);
-    } else {
-      this.agent.loadConversation([]);
-    }
-    this.opts.sessions.startNew(this.agent.model, this.server.name);
-    const where = folder ? ` in ${tildify(this.project.cwd)}` : "";
-    notes.unshift({ kind: "notice", level: "info", text: `Started a new session${where}. The previous one is ${previous}; /sessions lists this folder's sessions.` });
-    this.startOver(false, notes);
-  }
-
-  /**
-   * Makes `folder` the project: a fresh agent for it (its prompt, instructions,
-   * skills and permissions), keeping the server, model and reasoning level.
-   * Returns notes to show, or null (after printing why) if it isn't a folder.
-   */
-  private enterProject(folder: string): Entry[] | null {
-    let next: ProjectView;
-    try {
-      next = this.opts.switchProject(folder);
-    } catch (err) {
-      this.print({ kind: "notice", level: "error", text: (err as Error).message });
-      return null;
-    }
-    const current = { client: this.server.client, model: this.agent.model, reasoning: this.agent.reasoning, contextSize: this.agent.contextLimit };
-    this.project = next;
-    this.agent = this.opts.createAgent(this.hooks, current);
-    const notes = next.warnings.map((text): Entry => ({ kind: "notice", level: "warn", text }));
-    if (next.cwd === os.homedir() || next.cwd === "/") {
-      notes.push({ kind: "notice", level: "warn", text: `The project is now ${next.cwd}: the agent can change anything under it.` });
-    }
-    return notes;
-  }
-
-  private nameSession(name: string): void {
-    if (!name) {
-      const current = this.opts.sessions.currentName();
-      return this.print({ kind: "notice", level: "info", text: current ? `This session is named "${current}". /name <new name> renames it.` : "This session has no name yet. /name <name> gives it one; until then, listings use its first message." });
-    }
-    this.opts.sessions.rename(name);
-    const resume = /\s/.test(name) ? `agent --resume "${name}"` : `agent --resume ${name}`;
-    this.print({ kind: "notice", level: "info", text: `Named this session "${name}". Resume it from anywhere with: ${resume}` });
-  }
-
-  /** /open: recent project folders, and a way into the folder browser. */
-  private openProjectPicker(): void {
-    const recent = this.opts.sessions.recentProjects().filter((p) => p.cwd !== this.project.cwd && fs.existsSync(p.cwd));
-    const items = [
-      { value: `browse:${this.project.cwd}`, label: "Browse folders…", hint: "starting from the current project" },
-      ...recent.map((p) => ({
-        value: `use:${p.cwd}`,
-        // The folder's name stays readable even when its full path is long.
-        label: path.basename(p.cwd) || p.cwd,
-        hint: `${p.sessions} session${p.sessions === 1 ? "" : "s"} · ${ago(p.updated)} · ${tildify(path.dirname(p.cwd))}`,
-      })),
-    ];
-    this.picker = { kind: "folder", picker: new Picker("Open a project", items) };
-  }
-
-  /** The folder browser: enter goes into a folder, backspace or .. goes up, "Use this folder" switches. */
-  private browseFolder(dir: string): void {
-    const sessionCounts = new Map(this.opts.sessions.recentProjects().map((p) => [p.cwd, p.sessions]));
-    const describe = (folder: string) => {
-      const count = sessionCounts.get(folder);
-      return [isGitRepo(folder) && "git", count && `${count} session${count === 1 ? "" : "s"}`].filter(Boolean).join(" · ") || undefined;
-    };
-    const parent = path.dirname(dir);
-    const { names, error } = listFolders(dir);
-    const items = [
-      { value: `use:${dir}`, label: "✓ Use this folder", hint: describe(dir) ?? (dir === this.project.cwd ? "the current project" : undefined) },
-      ...(parent !== dir ? [{ value: `browse:${parent}`, label: "..", hint: "up one level" }] : []),
-      ...names.map((name) => ({ value: `browse:${path.join(dir, name)}`, label: `${name}/`, hint: describe(path.join(dir, name)) })),
-    ];
-    if (error) items.push({ value: `browse:${dir}`, label: `(${error})`, hint: undefined });
-    this.picker = {
-      kind: "folder",
-      picker: new Picker(tildify(dir), items, undefined, {
-        back: parent !== dir ? `browse:${parent}` : undefined,
-        help: "type to filter · enter opens · backspace goes up · esc cancels",
-      }),
-    };
-  }
-
-  /** Folders of the sessions listed in the open picker, to move there when one is chosen. */
-  private sessionFolders = new Map<string, string>();
-
-  private openSessionPicker(everywhere: boolean): void {
-    const current = this.opts.sessions.currentId();
-    const sessions = this.opts.sessions.list(everywhere);
-    if (sessions.length === 0 || (sessions.length === 1 && sessions[0]!.id === current)) {
-      const where = everywhere ? "" : " for this folder; /sessions all shows every folder's";
-      return this.print({ kind: "notice", level: "info", text: `There are no other saved sessions${where}.` });
-    }
-    this.sessionFolders = new Map(sessions.map((s) => [s.id, s.cwd]));
-    const items = sessions.map((s) => ({
-      value: s.id,
-      label: s.name,
-      hint: [
-        everywhere && shortPath(s.cwd, 32),
-        ago(s.updated),
-        `${s.turns} message${s.turns === 1 ? "" : "s"}`,
-        `${s.endpoint ? `${s.endpoint}/` : ""}${s.model}`,
-      ].filter(Boolean).join(" · "),
-    }));
-    const title = everywhere ? "Switch session (all folders)" : "Switch session (this folder; /sessions all for every folder)";
-    this.picker = { kind: "session", picker: new Picker(title, items, current) };
-  }
-
-  private async switchSession(id: string): Promise<void> {
-    // A session from another folder: work there, as when it was recorded.
-    const folder = this.sessionFolders.get(id);
-    let notes: Entry[] = [];
-    if (folder && folder !== this.project.cwd) {
-      if (!fs.existsSync(folder)) {
-        return this.print({ kind: "notice", level: "error", text: `That session's folder, ${folder}, doesn't exist anymore.` });
-      }
-      const entered = this.enterProject(folder);
-      if (!entered) return;
-      notes = [{ kind: "notice", level: "info", text: `Now working in ${tildify(folder)}.` }, ...entered];
-    }
-    let opened: ReturnType<SessionControl["open"]>;
-    try {
-      opened = this.opts.sessions.open(id);
-    } catch (err) {
-      return this.print({ kind: "notice", level: "error", text: `Could not open session ${id}: ${(err as Error).message}` });
-    }
-    this.agent.loadConversation(opened.messages);
-    this.startOver(true, [...notes, ...historyToEntries(opened.messages, this.project.tools)]);
-
-    // Continue on the endpoint and model the session last used, when they're available.
-    const { endpoint, model } = opened;
-    if (endpoint && endpoint !== this.server.name && this.opts.endpoints.some((e) => e.name === endpoint)) {
-      await this.switchEndpoint(endpoint, model);
-    } else if (model !== this.agent.model) {
-      const served = await this.server.listModels().catch(() => []);
-      if (served.some((m) => m.id === model)) await this.switchModel(model);
-      else this.print({ kind: "notice", level: "warn", text: `This session used ${model}, which ${this.server.label} doesn't serve; continuing with ${this.agent.model}.` });
     }
   }
 
@@ -865,79 +554,5 @@ export class TuiApp {
     }
     sandbox.network = arg === "on";
     this.print({ kind: "notice", level: "info", text: `Sandboxed commands now have network ${arg}.` });
-  }
-
-  private onPick(value: string): void {
-    const open = this.picker;
-    this.picker = null;
-    if (open?.kind === "endpoint" && value !== this.server.name) void this.switchEndpoint(value);
-    if (open?.kind === "session" && value !== this.opts.sessions.currentId()) void this.switchSession(value);
-    if (open?.kind === "folder") {
-      if (value.startsWith("browse:")) this.browseFolder(value.slice("browse:".length));
-      else if (value.startsWith("use:")) this.newSession(value.slice("use:".length));
-    }
-    if (open?.kind === "model" && value !== this.agent.model) void this.switchModel(value);
-    if (open?.kind === "reasoning" && isReasoningLevel(value) && value !== this.agent.reasoning) this.switchReasoning(value);
-  }
-
-  private switchModel(id: string): Promise<void> {
-    return this.withActivity(`Checking ${id}…`, async () => {
-      const contextSize = await this.server.contextSize(id);
-      this.agent.setModel(id, contextSize);
-      this.opts.savePreferences({ server: this.server, model: id });
-      const window = contextSize ? `${contextSize.toLocaleString()}-token context` : "context size unknown";
-      this.print({ kind: "notice", level: "info", text: `Switched to ${id} (${window}).` });
-    });
-  }
-
-  private switchReasoning(level: ReasoningLevel): void {
-    this.agent.setReasoning(level);
-    this.opts.savePreferences({ server: this.server, reasoning: level });
-    this.print({ kind: "notice", level: "info", text: `Reasoning: ${level} (${REASONING_HINTS[level]}).` });
-  }
-
-  private switchEndpoint(name: string, preferredModel?: string): Promise<void> {
-    const endpoint = this.opts.endpoints.find((e) => e.name === name);
-    if (!endpoint) {
-      const known = this.opts.endpoints.map((e) => e.name).join(", ") || "none";
-      this.print({ kind: "notice", level: "error", text: `Unknown endpoint "${name}". Configured: ${known}.` });
-      return Promise.resolve();
-    }
-    return this.withActivity(`Connecting to ${name}…`, async () => {
-      const next = Server.fromEndpoint(endpoint);
-      const model = await next.chooseModel([preferredModel, this.opts.rememberedModel(next.baseURL)]);
-      const contextSize = await next.contextSize(model);
-      this.agent.setModel(model, contextSize, next.client);
-      this.server = next;
-      this.refreshModels();
-      this.opts.savePreferences({ server: next, model });
-      const window = contextSize ? `${contextSize.toLocaleString()}-token context` : "context size unknown";
-      this.print({ kind: "notice", level: "info", text: `Connected to ${next.label}, using ${model} (${window}).` });
-    });
-  }
-
-  private openEndpointPicker(): void {
-    const { endpoints, configFile } = this.opts;
-    if (endpoints.length === 0) {
-      return this.print({ kind: "notice", level: "info", text: `No endpoints are configured. Add them to ${configFile}, for example:\n${EXAMPLE_CONFIG}` });
-    }
-    const items = endpoints.map((e) => ({ value: e.name, label: e.name, hint: e.model ? `${e.baseURL} · ${e.model}` : e.baseURL }));
-    this.picker = { kind: "endpoint", picker: new Picker("Select an endpoint", items, this.server.name) };
-  }
-
-  private openModelPicker(): Promise<void> {
-    return this.withActivity("Loading models…", async () => {
-      const models = await this.server.listModels(true);
-      if (models.length === 0) {
-        return this.print({ kind: "notice", level: "warn", text: "The server lists no models. Use /model <name> to set one directly." });
-      }
-      const items = models.map((m) => ({ value: m.id, label: m.id, hint: m.contextSize ? `${m.contextSize.toLocaleString()} ctx` : undefined }));
-      this.picker = { kind: "model", picker: new Picker("Select a model", items, this.agent.model) };
-    });
-  }
-
-  private openReasoningPicker(): void {
-    const items = REASONING_LEVELS.map((l) => ({ value: l, label: l, hint: REASONING_HINTS[l] }));
-    this.picker = { kind: "reasoning", picker: new Picker("Select reasoning level", items, this.agent.reasoning) };
   }
 }

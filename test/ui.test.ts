@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { LineEditor } from "../src/ui/editor.js";
+import { LineEditor } from "../src/tui/editor.js";
 import { box } from "../src/ui/entries.js";
 import { greeting } from "../src/ui/greetings.js";
-import { KeyReader } from "../src/ui/keys.js";
-import { inline, markdownLines, safeSplit } from "../src/ui/markdown.js";
-import { Picker } from "../src/ui/picker.js";
+import { KeyReader } from "../src/tui/keys.js";
+import { inline, markdownLines, safeSplit } from "../src/tui/markdown.js";
+import { Picker } from "../src/tui/picker.js";
 import { isGitRepo, listFolders, shortPath } from "../src/ui/folders.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { InlineRenderer } from "../src/ui/renderer.js";
-import { type Line, setColors, toAnsi } from "../src/ui/style.js";
-import { lineWidth, sanitize, textWidth, truncate, wrap } from "../src/ui/text.js";
+import { InlineRenderer } from "../src/tui/renderer.js";
+import { type Line, setColors, toAnsi } from "../src/tui/style.js";
+import { lineWidth, sanitize, textWidth, truncate, wrap } from "../src/tui/text.js";
 
 const plain = (lines: Line[]) => lines.map((l) => l.map((s) => s.text).join(""));
 

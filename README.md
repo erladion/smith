@@ -319,8 +319,13 @@ src/core/instructions.ts AGENTS.md loading
 src/core/skills.ts       skill discovery and SKILL.md headers
 src/core/diff.ts         line diffs (Myers) for approvals and the transcript
 src/core/undo.ts         per-turn file checkpoints for /undo
-src/ui/                  terminal UI: renderer, Markdown, keys, input editor, pickers
-src/cli.tsx              flags, model selection, TUI or headless mode
+src/tui/                 general terminal toolkit: renderer, keys, input editor, Markdown,
+                         pickers; it doesn't import the agent (a test keeps it that way)
+src/ui/app.ts            the agent's TUI: screen, keys, agent turns, slash commands
+src/ui/sessions.ts       /new, /sessions, /name, /open and the folder browser
+src/ui/connection.ts     /endpoint, /model, /reasoning
+src/ui/                  also: transcript entries, command list and suggestions, replay
+src/cli.ts               flags, model selection, TUI or headless mode
 test/                    unit tests, and loop tests against a fake streaming server
 ```
 

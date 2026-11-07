@@ -1,8 +1,8 @@
 import type { DiffLine } from "../core/diff.js";
 import type { NoticeLevel } from "../core/events.js";
-import { markdownLines } from "./markdown.js";
-import type { Color, Line, Style } from "./style.js";
-import { lineWidth, prefixed, truncate, wrap } from "./text.js";
+import { markdownLines } from "../tui/markdown.js";
+import type { Color, Line, Style } from "../tui/style.js";
+import { lineWidth, prefixed, truncate, wrap } from "../tui/text.js";
 
 /** Something printed into the transcript. */
 export type Entry =
