@@ -1,4 +1,5 @@
 import type { DiffLine } from "./diff.js";
+import type { Todo } from "./tools/todo.js";
 
 // Everything the agent loop reports to the outside world. The core never
 // imports UI code: a frontend (TUI, headless printer, tests) subscribes to
@@ -24,4 +25,6 @@ export type AgentEvent =
   /** Background work worth showing in a status line; `compacting` while the conversation is being summarized. */
   | { type: "activity"; text: string; compacting?: boolean }
   | { type: "notice"; level: NoticeLevel; text: string }
+  /** The model rewrote its checklist (todo_write), or it was cleared or restored. */
+  | { type: "todos"; todos: Todo[] }
   | { type: "done"; reason: DoneReason };

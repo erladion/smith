@@ -432,3 +432,93 @@ test("reports every tool call for the tool log, whatever its outcome", async () 
   assert.equal(runs[5]!.output, "nothing here");
   assert.ok(runs.every((r) => !Number.isNaN(Date.parse(r.time)) && r.durationMs >= 0));
 });
+
+const todoCall = (todos: { content: string; status: string }[], id = "todo1") => toolCallDeltas("todo_write", { todos }, id);
+
+test("todo_write keeps a checklist, and a model that stops early is reminded once", async () => {
+  fake.script = [
+    { deltas: todoCall([{ content: "Read the code", status: "in_progress" }, { content: "Fix the bug", status: "pending" }]), finish: "tool_calls" },
+    // Stops with steps left: reminded.
+    { deltas: [{ content: "I looked at it." }], finish: "stop" },
+    { deltas: todoCall([{ content: "Read the code", status: "completed" }, { content: "Fix the bug", status: "in_progress" }], "todo2"), finish: "tool_calls" },
+    // Stops again: not reminded twice in one turn.
+    { deltas: [{ content: "Still on it." }], finish: "stop" },
+  ];
+  const { agent, events } = makeAgent();
+  await agent.send("fix it", new AbortController().signal);
+
+  assert.equal(fake.requests.length, 4);
+  const reminder = fake.requests[2]!.messages.at(-1);
+  assert.equal(reminder.role, "user");
+  assert.match(reminder.content, /^\[Reminder\] Your todo list still has unfinished steps:\n\[>\] Read the code\n\[ \] Fix the bug/);
+  assert.match(fake.requests[1]!.messages.at(-1).content, /Todo list updated \(0\/2 done\)/);
+  assert.deepEqual(agent.todos.map((t) => t.status), ["completed", "in_progress"]);
+  assert.equal(events.filter((e) => e.type === "todos").length, 2);
+  assert.ok(events.some((e) => e.type === "notice" && /Reminded the agent of 2 unfinished todos/.test(e.text)));
+});
+
+test("the checklist comes back with a saved conversation and survives compaction", async () => {
+  const todos = [{ content: "Write tests", status: "completed" }, { content: "Ship it", status: "pending" }];
+  const history: Message[] = [
+    { role: "user", content: "plan it" },
+    { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "todo_write", arguments: JSON.stringify({ todos }) } }] },
+    { role: "tool", tool_call_id: "t1", content: "Todo list updated" },
+    { role: "assistant", content: "Planned." },
+  ];
+  // Long enough that the start gets summarized.
+  for (let i = 0; i < 4; i++) history.push({ role: "user", content: "x".repeat(1500) }, { role: "assistant", content: "y".repeat(1500) });
+  const { agent } = makeAgent("allow", { history, contextSize: 4000 });
+  assert.deepEqual(agent.todos, todos);
+
+  fake.script = [{ content: "We planned the work." }];
+  await agent.compactNow(new AbortController().signal);
+  const intro = agent.messages[1]!;
+  assert.match(String(intro.content), /Your todo list so far:\n\[x\] Write tests\n\[ \] Ship it/);
+});
+
+test("sub-agents get no checklist and no questions; ask_user is offered only with a way to ask", async () => {
+  fake.script = [{ deltas: [{ content: "hi" }], finish: "stop" }];
+  await makeAgent().agent.send("hi", new AbortController().signal);
+  const names = (i: number) => fake.requests[i]!.tools.map((t: { function: { name: string } }) => t.function.name);
+  assert.ok(names(0).includes("todo_write"));
+  assert.ok(!names(0).includes("ask_user"));
+
+  fake.script = [{ deltas: [{ content: "hi" }], finish: "stop" }];
+  await makeAgent("allow", { ask: async () => null }).agent.send("hi", new AbortController().signal);
+  assert.ok(names(1).includes("ask_user"));
+});
+
+test("ask_user waits for the answer: an option, the user's own words, or dismissed", async () => {
+  const ask = (index: number, id: string, question: string) => ({
+    tool_calls: [{ index, id, type: "function", function: { name: "ask_user", arguments: JSON.stringify({ question, options: ["Postgres", "SQLite"] }) } }],
+  });
+  fake.script = [
+    // Two questions in one response are asked one after the other.
+    { deltas: [ask(0, "q1", "Which database?"), ask(1, "q2", "Which port?")], finish: "tool_calls" },
+    { deltas: [{ content: "OK." }], finish: "stop" },
+  ];
+  const asked: string[] = [];
+  let open = 0;
+  const answers = [{ option: 1 }, { text: "5433, please" }];
+  const { agent } = makeAgent("allow", {
+    ask: async (q) => {
+      assert.equal(open++, 0, "one question at a time");
+      asked.push(q.question);
+      await new Promise((r) => setTimeout(r, 10));
+      open--;
+      return answers.shift()!;
+    },
+  });
+  await agent.send("set up a database", new AbortController().signal);
+  assert.deepEqual(asked, ["Which database?", "Which port?"]);
+  const results = fake.requests[1]!.messages.filter((m: { role: string }) => m.role === "tool").map((m: { content: string }) => m.content);
+  assert.deepEqual(results, ["The user chose: SQLite", "The user answered: 5433, please"]);
+
+  fake.script = [
+    { deltas: [ask(0, "q3", "Which one?")], finish: "tool_calls" },
+    { deltas: [{ content: "Fine." }], finish: "stop" },
+  ];
+  const dismissed = makeAgent("allow", { ask: async () => null }).agent;
+  await dismissed.send("pick", new AbortController().signal);
+  assert.match(fake.requests.at(-1)!.messages.at(-1).content, /^Error: The user dismissed the question/);
+});

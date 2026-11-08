@@ -1,8 +1,9 @@
 import type { ApprovalRequest } from "../core/agent.js";
 import type { Theme } from "../core/config.js";
 import type { Sandbox } from "../core/sandbox.js";
+import type { Question } from "../core/tools/ask.js";
 import type { Color, Line } from "../tui/style.js";
-import { lineWidth, truncate, wrap } from "../tui/text.js";
+import { lineWidth, prefixed, truncate, wrap } from "../tui/text.js";
 import { box, DIM, diffView } from "./entries.js";
 
 // Parts of the live region that are drawn from plain data.
@@ -39,6 +40,24 @@ export function approvalBox(req: ApprovalRequest, width: number, rows: number): 
     { text: " no and interrupt", style: DIM },
   ]);
   return box(content, "yellow", width, true);
+}
+
+/** The agent's question, its suggested answers (the `selected` one highlighted), and the keys. */
+export function questionBox(q: Question, selected: number, width: number): Line[] {
+  const content: Line[] = wrap([{ text: q.question, style: { bold: true } }], width - 4);
+  if (q.options.length) {
+    content.push([]);
+    q.options.forEach((option, i) => {
+      const on = i === selected;
+      content.push(...prefixed([{ text: on ? "› " : "  ", style: { color: "cyan" } }, { text: `${i + 1}. `, style: DIM }], [{ text: "     " }], [{ text: option, style: on ? { color: "cyan", bold: true } : {} }], width - 4));
+    });
+  }
+  content.push([]);
+  const keys = q.options.length
+    ? `↑↓ and enter, or 1-${q.options.length}, picks · or type your own answer below · esc dismisses`
+    : "type your answer below · esc dismisses";
+  content.push(...wrap([{ text: keys, style: DIM }], width - 4));
+  return box(content, "cyan", width, true);
 }
 
 export interface Status {

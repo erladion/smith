@@ -1,6 +1,8 @@
+import { TODO_REMINDER } from "../core/agent.js";
 import { SUMMARY_PREFIX } from "../core/context.js";
 import { type Message, messageText } from "../core/history.js";
 import { describeCall, type ToolDef } from "../core/tool.js";
+import { parseTodos, TODO_TOOL } from "../core/tools/todo.js";
 import type { Entry } from "./entries.js";
 
 /** Rebuilds transcript entries from a saved conversation, so a resumed session shows its history. */
@@ -16,6 +18,8 @@ export function historyToEntries(messages: readonly Message[], tools: ToolDef[])
         entries.push({ kind: "notice", level: "info", text: "(Earlier conversation was summarized to save context.)" });
         const sep = text.indexOf("\n\n---\n\n");
         if (sep !== -1) entries.push({ kind: "user", text: text.slice(sep + 7) });
+      } else if (text.startsWith(TODO_REMINDER)) {
+        entries.push({ kind: "notice", level: "info", text: "Reminded the agent of its unfinished todos." });
       } else {
         entries.push({ kind: "user", text });
       }
@@ -26,6 +30,11 @@ export function historyToEntries(messages: readonly Message[], tools: ToolDef[])
         if (call.type !== "function") continue;
         const output = results.get(call.id) ?? "";
         const isError = output.startsWith("Error: ");
+        const todos = call.function.name === TODO_TOOL && !isError ? parseTodos(call.function.arguments) : null;
+        if (todos) {
+          entries.push({ kind: "todos", todos });
+          continue;
+        }
         entries.push({
           kind: "tool",
           name: call.function.name,

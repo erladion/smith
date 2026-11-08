@@ -243,6 +243,16 @@ their scripts can run.
   Only its short report comes back, so the file reading never fills the main conversation,
   which matters most with small context windows. Set `"subagents": false` in the config file to
   turn it off, e.g. for a model that overuses it.
+- **A todo list.** For a task with several steps, the model writes a checklist with
+  `todo_write` and rewrites it as steps start and finish. The transcript shows the list each time
+  it changes, and the step in progress shows under the spinner. If the model stops while steps
+  are left, it's reminded of them once per turn, since small models often stop halfway. The list
+  is part of the conversation, so it comes back with a resumed session and is kept when the
+  conversation is compacted.
+- **Questions.** When a request is unclear, the model can ask with `ask_user`, suggesting up to
+  four answers. Pick one with ↑/↓ and enter or its number, or type your own answer; esc
+  dismisses the question and interrupts. With `-p` nobody can answer, so the tool isn't offered
+  and the model is told to state its assumptions instead.
 - **Fast tools.** `rg` (ripgrep), `fd` and `jq` are detected at startup. The `grep` tool uses
   ripgrep when it's there (else grep), `glob` lists files with `rg --files` (faster on big
   repositories, and skips what `.gitignore` ignores), and the system prompt tells the model which
@@ -329,7 +339,8 @@ src/core/reasoning.ts    reasoning levels -> request fields
 src/core/think.ts        streaming <think> tag parser
 src/core/sandbox.ts      bubblewrap sandbox for shell commands
 src/core/glob.ts         glob matching for the glob tool
-src/core/tools/          read_file, grep, glob, write_file, edit_file, bash, skill
+src/core/tools/          read_file, grep, glob, write_file, edit_file, bash, skill, task,
+                         todo_write, ask_user
 src/core/instructions.ts AGENTS.md loading
 src/core/skills.ts       skill discovery and SKILL.md headers
 src/core/diff.ts         line diffs (Myers) for approvals and the transcript

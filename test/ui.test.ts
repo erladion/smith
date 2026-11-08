@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { LineEditor } from "../src/tui/editor.js";
-import { box } from "../src/ui/entries.js";
+import { TODO_REMINDER } from "../src/core/agent.js";
+import { box, todoLines } from "../src/ui/entries.js";
+import { historyToEntries } from "../src/ui/replay.js";
+import { questionBox } from "../src/ui/view.js";
 import { farewell, greeting } from "../src/ui/greetings.js";
 import { KeyReader } from "../src/tui/keys.js";
 import { inline, markdownLines, safeSplit } from "../src/tui/markdown.js";
@@ -411,5 +414,43 @@ describe("matrix extras", () => {
     assert.ok(streamed.map((s) => s.text).join("").endsWith("ｱ".repeat(24)));
     assert.deepEqual(statusLine({ ...status, filler: (n) => "ｱ".repeat(n) }, 40), statusLine(status, 40), "no room, no stream");
     assert.ok(lineWidth(plain) < 80);
+  });
+});
+
+describe("todos and questions", () => {
+  const text = (lines: Line[]) => lines.map((l) => l.map((s) => s.text).join("").trimEnd());
+
+  test("the checklist shows progress and each step's state", () => {
+    const todos = [
+      { content: "Read the code", status: "completed" as const },
+      { content: "Fix the bug", status: "in_progress" as const },
+      { content: "Run the tests", status: "pending" as const },
+    ];
+    assert.deepEqual(text(todoLines(todos, 40)), ["● Todos 1/3 done", "  ✔ Read the code", "  ▶ Fix the bug", "  ○ Run the tests"]);
+    assert.deepEqual(text(todoLines([], 40)), ["● Todos cleared"]);
+  });
+
+  test("the question box numbers the options and marks the selected one", () => {
+    const lines = text(questionBox({ question: "Which database?", options: ["Postgres", "SQLite"] }, 1, 60));
+    assert.ok(lines.includes("│ Which database?                                          │"));
+    assert.ok(lines.some((l) => l.startsWith("│   1. Postgres")));
+    assert.ok(lines.some((l) => l.startsWith("│ › 2. SQLite")));
+    assert.ok(lines.some((l) => l.includes("or 1-2, picks")));
+    const open = text(questionBox({ question: "Anything else?", options: [] }, 0, 60));
+    assert.ok(open.some((l) => l.includes("type your answer below")));
+  });
+
+  test("a resumed session shows its checklists and reminders, not raw calls", () => {
+    const todos = [{ content: "Ship it", status: "pending" }];
+    const entries = historyToEntries(
+      [
+        { role: "user", content: "go" },
+        { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "todo_write", arguments: JSON.stringify({ todos }) } }] },
+        { role: "tool", tool_call_id: "t1", content: "Todo list updated" },
+        { role: "user", content: `${TODO_REMINDER}\n[ ] Ship it` },
+      ],
+      [],
+    );
+    assert.deepEqual(entries.map((e) => e.kind), ["user", "todos", "notice"]);
   });
 });

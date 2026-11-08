@@ -1,7 +1,8 @@
 import type { DiffLine } from "../core/diff.js";
 import type { NoticeLevel } from "../core/events.js";
+import { type Todo, todoProgress } from "../core/tools/todo.js";
 import { markdownLines } from "../tui/markdown.js";
-import type { Color, Line, Style } from "../tui/style.js";
+import type { Color, Line, Span, Style } from "../tui/style.js";
 import { lineWidth, prefixed, truncate, wrap } from "../tui/text.js";
 
 /** Something printed into the transcript. */
@@ -29,7 +30,9 @@ export type Entry =
   /** Quiet information, e.g. how long a turn took. */
   | { kind: "meta"; text: string }
   /** Agent Smith remarking on something, directly under the entry before it. */
-  | { kind: "quote"; text: string };
+  | { kind: "quote"; text: string }
+  /** The agent's checklist, after it changed. */
+  | { kind: "todos"; todos: Todo[] };
 
 export const DIM: Style = { dim: true };
 export const REASONING: Style = { dim: true, italic: true };
@@ -56,7 +59,28 @@ export function entryLines(entry: Entry, width: number): Line[] {
       return [[], ...wrap([{ text: entry.text, style: DIM }], width)];
     case "quote":
       return wrap([{ text: entry.text, style: { color: "green", italic: true } }], width);
+    case "todos":
+      return [[], ...todoLines(entry.todos, width)];
   }
+}
+
+/** The checklist under a header: done steps dim, the current one bold. */
+export function todoLines(todos: Todo[], width: number): Line[] {
+  const header: Line = [
+    { text: "● ", style: { color: "green" } },
+    { text: "Todos", style: { bold: true } },
+    { text: todos.length ? ` ${todoProgress(todos)}` : " cleared", style: DIM },
+  ];
+  const items = todos.map((t): Line[] => {
+    const [mark, style]: [Span, Style] =
+      t.status === "completed"
+        ? [{ text: "  ✔ ", style: { color: "green" } }, DIM]
+        : t.status === "in_progress"
+          ? [{ text: "  ▶ ", style: { color: "yellow" } }, { bold: true }]
+          : [{ text: "  ○ ", style: DIM }, {}];
+    return prefixed([mark], [{ text: "    " }], [{ text: t.content, style }], width);
+  });
+  return [header, ...items.flat()];
 }
 
 function bannerLines(b: Extract<Entry, { kind: "banner" }>, width: number): Line[] {

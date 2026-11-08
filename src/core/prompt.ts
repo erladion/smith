@@ -9,6 +9,8 @@ export interface PromptExtras {
   skills?: Skill[];
   /** Faster command-line tools found on this machine, to suggest for shell commands. */
   fastTools?: FastTools;
+  /** The user can be asked questions (ask_user); not in non-interactive runs. */
+  canAsk?: boolean;
 }
 
 export function buildSystemPrompt(cwd: string, extras: PromptExtras = {}): string {
@@ -23,6 +25,11 @@ How to work:
 - Read a file before editing it. Use edit_file for targeted changes and write_file for new files or full rewrites.
 - File paths are relative to the working directory. You can only change files inside it. read_file, grep and glob can also read outside it (absolute paths, ../, ~/); the user is asked first, and credential folders are off limits.
 - Shell commands run non-interactively in bash. Prefer quick, targeted commands and avoid ones that wait for input.${fastToolsLine(extras.fastTools)}
+- For a task with several steps, write a checklist with todo_write first and update it as you go, so neither you nor the user loses track. Work through it until every step is done.${
+    extras.canAsk
+      ? "\n- If the request is ambiguous or needs a decision only the user can make, ask with ask_user rather than guessing. Don't ask about what you can find out yourself."
+      : "\n- Nobody can answer questions during this run: make reasonable assumptions, and say what you assumed."
+  }
 - After making a change, check it when you can, for example by running the build or tests.
 - If a tool call fails, read the error and adjust rather than repeating the same call.
 - When you need several independent lookups (reading files, searching), ask for them in one response: read-only tools run in parallel.

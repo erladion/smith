@@ -2,6 +2,8 @@ import type { Agent, ApprovalDecision, ApprovalRequest } from "../core/agent.js"
 import { describeError } from "../core/errors.js";
 import type { AgentEvent, BlockKind } from "../core/events.js";
 import type { Server } from "../core/server.js";
+import type { Answer, Question } from "../core/tools/ask.js";
+import { TODO_TOOL, unfinished } from "../core/tools/todo.js";
 import { LineEditor } from "../tui/editor.js";
 import { type Key, KeyReader } from "../tui/keys.js";
 import { markdownLines, safeSplit } from "../tui/markdown.js";
@@ -19,7 +21,7 @@ import { historyToEntries } from "./replay.js";
 import { SessionCommands } from "./sessions.js";
 import { SuggestionList } from "./suggestions.js";
 import type { AgentHooks, ProjectView, TuiOptions, UiContext } from "./types.js";
-import { approvalBox, runningLabel, SPINNERS, statusLine } from "./view.js";
+import { approvalBox, questionBox, runningLabel, SPINNERS, statusLine } from "./view.js";
 
 interface Terminal {
   input: NodeJS.ReadStream;
@@ -58,6 +60,8 @@ export class TuiApp implements UiContext {
   private activity: string | null = null;
   private approval: (ApprovalRequest & { resolve: (d: ApprovalDecision) => void }) | null = null;
   private picker: { picker: Picker; onPick: (value: string) => void } | null = null;
+  /** The agent's question (ask_user), with the suggested answer highlighted. */
+  private question: (Question & { selected: number; resolve: (a: Answer) => void }) | null = null;
   private busy = false;
   private abort: AbortController | null = null;
   private context: { tokens: number; limit?: number } | null = null;
@@ -70,6 +74,9 @@ export class TuiApp implements UiContext {
   private strip: Rain | null = null;
   /** A full-screen animation (/redpill) has the terminal: no drawing, no keys. */
   private paused = false;
+
+  /** What was in the input box when a question came up, put back after the answer. */
+  private stashed = "";
 
   /** Everything printed so far, to reprint at a new width after a resize. */
   private readonly transcript: Entry[] = [];
@@ -89,7 +96,7 @@ export class TuiApp implements UiContext {
     this.server = opts.server;
     this.renderer = new InlineRenderer(term.output);
     this.project = opts.project;
-    this.hooks = { onEvent: (e) => this.onEvent(e), approve: (r) => this.approve(r) };
+    this.hooks = { onEvent: (e) => this.onEvent(e), approve: (r) => this.approve(r), ask: (q) => this.ask(q) };
     this.agent = opts.createAgent(this.hooks);
     this.connection = new ConnectionCommands(this);
     this.sessions = new SessionCommands(this, this.connection);
@@ -219,6 +226,7 @@ export class TuiApp implements UiContext {
     this.closed = true;
     this.abort?.abort();
     this.approval?.resolve("deny");
+    this.question?.resolve(null);
     clearInterval(this.ticker);
     clearTimeout(this.renderTimer);
     clearTimeout(this.resizeTimer);
@@ -260,7 +268,7 @@ export class TuiApp implements UiContext {
   private render(): void {
     if (this.closed || this.paused) return;
     // The animations only need a timer while one is on screen.
-    const animating = Boolean(this.activity && !this.approval) || this.streaming;
+    const animating = Boolean(this.activity && !this.prompting) || this.streaming;
     if (animating && !this.ticker) {
       this.ticker = setInterval(() => {
         this.frame++;
@@ -281,7 +289,7 @@ export class TuiApp implements UiContext {
       lines.push([]);
       lines.push(...(this.live.kind === "text" ? markdownLines(this.live.text, width) : wrap([{ text: this.live.text, style: REASONING }], width)));
     }
-    if (this.activity && !this.approval) {
+    if (this.activity && !this.prompting) {
       const elapsed = this.turn ? ` · ${formatDuration(Date.now() - this.turn.started)}` : "";
       if (this.compacting && this.matrix && colorsEnabled()) {
         // A strip of rain, with the activity beside its middle row.
@@ -297,9 +305,20 @@ export class TuiApp implements UiContext {
         const { frames, color } = this.spinnerStyle;
         lines.push([], truncate([{ text: frames[this.frame % frames.length]!, style: { color } }, { text: ` ${this.activity}${elapsed}`, style: DIM }], width));
       }
+      // The step the agent is on, from its checklist.
+      const { todos } = this.agent;
+      const current = todos.find((t) => t.status === "in_progress");
+      if (current && this.busy) {
+        const done = todos.length - unfinished(todos).length;
+        lines.push(truncate([{ text: `  ▶ ${done + 1}/${todos.length} `, style: { color: "yellow" } }, { text: current.content, style: DIM }], width));
+      }
     }
     if (this.approval) {
       lines.push([], ...approvalBox(this.approval, width, this.term.output.rows || 24));
+    } else if (this.question) {
+      lines.push([], ...questionBox(this.question, this.question.selected, width));
+      const answer = prefixed([{ text: "› ", style: { color: "cyan" } }], [{ text: "  " }], this.editor.render("Your answer"), width - 4);
+      lines.push(...box(answer, "gray", width, true));
     } else if (this.picker) {
       lines.push([], ...box(this.picker.picker.lines(), "cyan", width));
     } else if (!this.busy || this.agentRunning) {
@@ -364,6 +383,8 @@ export class TuiApp implements UiContext {
         if (this.turn) this.turn.toolCalls++;
         this.running.delete(event.id);
         this.activity = runningLabel([...this.running.values()]);
+        // The checklist itself was printed when it changed.
+        if (event.name === TODO_TOOL && !event.isError) break;
         this.print({ kind: "tool", name: event.name, summary: event.summary, output: event.output, isError: event.isError, diff: event.diff });
         break;
       case "context":
@@ -377,6 +398,12 @@ export class TuiApp implements UiContext {
       case "notice":
         this.flushLive();
         this.print({ kind: "notice", level: event.level, text: event.text });
+        break;
+      case "todos":
+        if (this.busy) {
+          this.flushLive();
+          this.print({ kind: "todos", todos: event.todos });
+        }
         break;
       case "done":
         if (this.turn) this.turn.reason = event.reason;
@@ -418,11 +445,54 @@ export class TuiApp implements UiContext {
     pending?.resolve(decision);
   }
 
+  /** An approval or a question is waiting for the user. */
+  private get prompting(): boolean {
+    return Boolean(this.approval || this.question);
+  }
+
+  private ask(question: Question): Promise<Answer> {
+    return new Promise((resolve) => {
+      // Whatever was typed meanwhile (to queue) stays for after; the answer starts empty.
+      this.stashed = this.editor.value;
+      this.editor.setValue("");
+      this.question = { ...question, selected: 0, resolve };
+      this.requestRender();
+    });
+  }
+
+  private answer(answer: Answer): void {
+    const pending = this.question;
+    this.question = null;
+    this.editor.setValue(this.stashed);
+    this.stashed = "";
+    pending?.resolve(answer);
+  }
+
+  /** Keys while the agent's question shows: pick an option, or type an answer. */
+  private onQuestionKey(key: Key): void {
+    const q = this.question!;
+    const typing = this.editor.value.length > 0;
+    if (key.name === "escape") {
+      this.answer(null);
+      this.abort?.abort();
+    } else if (!typing && q.options.length && (key.name === "up" || key.name === "down")) {
+      const n = q.options.length;
+      q.selected = (q.selected + (key.name === "up" ? n - 1 : 1)) % n;
+    } else if (!typing && key.name === "text" && /^[1-9]$/.test(key.text ?? "") && Number(key.text) <= q.options.length) {
+      this.answer({ option: Number(key.text) - 1 });
+    } else if (!typing && key.name === "return" && q.options.length) {
+      this.answer({ option: q.selected });
+    } else if (this.editor.handle(key) === "submit") {
+      const text = this.editor.commit().trim();
+      if (text) this.answer({ text });
+    }
+  }
+
   // ---- keys ----
 
   /** Command suggestions for the input, unless something else has the keys. */
   private currentSuggestions() {
-    if (this.busy || this.approval || this.picker) return [];
+    if (this.busy || this.prompting || this.picker) return [];
     return this.suggestions.items(this.editor.value, { cwd: this.project.cwd, endpoints: this.opts.endpoints.map((e) => e.name) });
   }
 
@@ -440,6 +510,8 @@ export class TuiApp implements UiContext {
       }
       return;
     }
+
+    if (this.question) return this.onQuestionKey(key);
 
     if (this.picker) {
       const open = this.picker;

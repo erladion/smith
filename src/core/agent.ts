@@ -18,7 +18,9 @@ import { Sandbox } from "./sandbox.js";
 import { type HistoryChange, type Message, messageText, repairHistory } from "./history.js";
 import { stripThinkTags, ThinkTagParser } from "./think.js";
 import { type ToolDef, type ToolResult, toApiTool, truncate } from "./tool.js";
+import { type Answer, createAskTool, type Question } from "./tools/ask.js";
 import { createTaskTool, type TaskInput } from "./tools/task.js";
+import { createTodoTool, formatTodos, type Todo, todosFromHistory, unfinished } from "./tools/todo.js";
 import type { ToolApproval, ToolRun } from "./toollog.js";
 import { Checkpoint, restore } from "./undo.js";
 
@@ -50,6 +52,9 @@ export interface UndoResult {
 
 const MAX_UNDO = 20;
 const MAX_REPORT_CHARS = 8_000;
+
+/** Starts the message that reminds the model of unfinished todos when it stops early. */
+export const TODO_REMINDER = "[Reminder] Your todo list still has unfinished steps:";
 
 export interface AgentOptions {
   client: OpenAI;
@@ -83,6 +88,13 @@ export interface AgentOptions {
    * settle this promise (with "deny") if the user interrupts while it's pending.
    */
   approve: (req: ApprovalRequest) => Promise<ApprovalDecision>;
+  /**
+   * Asks the user a question for the ask_user tool; without it the tool isn't
+   * offered. Like `approve`, the frontend must settle it (with null) on interrupt.
+   */
+  ask?: (question: Question) => Promise<Answer>;
+  /** Gives the agent the todo_write tool for keeping a checklist (default true). */
+  todos?: boolean;
   onEvent: (event: AgentEvent) => void;
   /** Called when each tool call is over, whatever the outcome, e.g. for the tool log. */
   onToolRun?: (run: ToolRun) => void;
@@ -132,12 +144,15 @@ export class Agent {
   private reasoningLevel: ReasoningLevel;
   /** Last exact token count from the server, and how many messages it covered. */
   private measured: { tokens: number; messages: number } | null = null;
+  /** The checklist the model keeps with todo_write. */
+  private todoList: Todo[] = [];
 
   constructor(private readonly opts: AgentOptions) {
     this.history = [{ role: "system", content: opts.systemPrompt }, ...repairHistory(opts.history ?? [])];
-    const tools = opts.subagentPrompt
-      ? [...opts.tools, createTaskTool((input, ctx) => this.runSubagent(input, ctx.signal))]
-      : opts.tools;
+    const tools = [...opts.tools];
+    if (opts.subagentPrompt) tools.push(createTaskTool((input, ctx) => this.runSubagent(input, ctx.signal)));
+    if (opts.todos !== false) tools.push(createTodoTool((todos) => this.setTodos(todos)));
+    if (opts.ask) tools.push(createAskTool((question) => this.askUser(question)));
     this.toolsByName = new Map(tools.map((t) => [t.name, t]));
     this.apiTools = tools.map(toApiTool);
     this.contextSize = opts.contextSize;
@@ -145,6 +160,7 @@ export class Agent {
     this.client = opts.client;
     this.modelId = opts.model;
     this.reasoningLevel = opts.reasoning ?? "default";
+    this.todoList = todosFromHistory(this.history);
   }
 
   get model(): string {
@@ -177,6 +193,11 @@ export class Agent {
     this.reasoningLevel = level;
   }
 
+  /** The model's checklist, as last written with todo_write. */
+  get todos(): readonly Todo[] {
+    return this.todoList;
+  }
+
   /** The full conversation, including the system prompt. */
   get messages(): readonly Message[] {
     return this.history;
@@ -186,6 +207,7 @@ export class Agent {
   reset(): void {
     this.replaceHistory([]);
     this.turns = [];
+    this.setTodos([]);
   }
 
   /**
@@ -197,6 +219,7 @@ export class Agent {
     this.history.splice(1, this.history.length, ...repairHistory(messages));
     this.measured = null;
     this.turns = [];
+    this.setTodos(todosFromHistory(this.history));
     this.emitContext();
   }
 
@@ -235,6 +258,7 @@ export class Agent {
     if (!turn) return null;
     const { restored, skipped } = await restore(turn.checkpoint);
     this.replaceHistory(this.history.slice(1, turn.start));
+    this.setTodos(todosFromHistory(this.history));
     this.emitContext();
     return { prompt: turn.prompt, restored, skipped, untracked: [...turn.checkpoint.untracked] };
   }
@@ -270,6 +294,7 @@ export class Agent {
     const emit = this.opts.onEvent;
     const maxSteps = this.opts.maxSteps ?? 50;
     let retriedOverflow = false;
+    let reminded = false;
 
     for (let step = 0; step < maxSteps; step++) {
       if (step > 0) this.deliverQueued();
@@ -301,6 +326,17 @@ export class Agent {
       if (response.toolCalls.length === 0) {
         // Something you typed while it answered: keep going so the model sees it.
         if (this.queued.length > 0 && response.finishReason !== "length") continue;
+        // Small models often stop halfway through a plan: point them back to it, once a turn.
+        const left = unfinished(this.todoList);
+        if (left.length > 0 && !reminded && response.finishReason !== "length") {
+          reminded = true;
+          emit({ type: "notice", level: "info", text: `Reminded the agent of ${left.length} unfinished todo${left.length === 1 ? "" : "s"}.` });
+          this.append({
+            role: "user",
+            content: `${TODO_REMINDER}\n${formatTodos(this.todoList)}\n\nContinue with them. If they're done or no longer needed, update the list with todo_write. If you need something from the user, ask them.`,
+          });
+          continue;
+        }
         if (response.finishReason === "length") {
           emit({ type: "notice", level: "warn", text: "The response hit the server's token limit and was cut off." });
           emit({ type: "done", reason: "length" });
@@ -380,8 +416,9 @@ export class Agent {
       maxSteps: this.opts.maxSteps,
       contextSize: this.contextSize,
       sandbox: this.opts.sandbox,
-      // Read-only tools only (which also rules out nested sub-agents).
+      // Read-only tools only (which also rules out nested sub-agents), no checklist or questions.
       tools: this.opts.tools.filter((t) => t.readOnly),
+      todos: false,
       systemPrompt: this.opts.subagentPrompt!,
       alwaysAllowed: this.alwaysAllowed,
       // Its tools are read-only, but reading outside the project still asks you.
@@ -461,7 +498,9 @@ export class Agent {
     emit({ type: "activity", text: "Summarizing the conversation to free context…", compacting: true });
     const maxChars = Math.max(8_000, Math.floor((limit - fixedCost - 4_096) * CHARS_PER_TOKEN * 0.8));
     const summary = await this.summarize(head, maxChars, signal);
-    const intro = SUMMARY_PREFIX + summary;
+    // The checklist lives in the tool calls being summarized away; carry it over.
+    const todos = unfinished(this.todoList).length ? `\n\nYour todo list so far:\n${formatTodos(this.todoList)}` : "";
+    const intro = SUMMARY_PREFIX + summary + todos;
 
     // Keep user/assistant alternation: some chat templates reject two user messages in a row.
     const first = tail[0];
@@ -686,6 +725,19 @@ export class Agent {
     const decision = this.approvals.then(() => (this.alwaysAllowed.has(req.tool) ? "allow" : this.opts.approve(req)));
     this.approvals = decision.catch(() => {});
     return decision;
+  }
+
+  private setTodos(todos: Todo[]): void {
+    const changed = JSON.stringify(todos) !== JSON.stringify(this.todoList);
+    this.todoList = todos;
+    if (changed) this.opts.onEvent({ type: "todos", todos });
+  }
+
+  /** Questions wait their turn with approvals, so only one prompt shows at a time. */
+  private askUser(question: Question): Promise<Answer> {
+    const answer = this.approvals.then(() => this.opts.ask!(question));
+    this.approvals = answer.catch(() => {});
+    return answer;
   }
 
   private toolContext(tool: ToolDef, signal: AbortSignal) {

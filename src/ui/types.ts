@@ -8,12 +8,15 @@ import type { Sandbox } from "../core/sandbox.js";
 import type { Server } from "../core/server.js";
 import type { SessionInfo } from "../core/session.js";
 import type { ToolDef } from "../core/tool.js";
+import type { Answer, Question } from "../core/tools/ask.js";
 import type { Picker } from "../tui/picker.js";
 import type { Entry } from "./entries.js";
 
 export interface AgentHooks {
   onEvent: (event: AgentEvent) => void;
   approve: (req: ApprovalRequest) => Promise<ApprovalDecision>;
+  /** Questions from the ask_user tool; without it (non-interactive runs) the tool isn't offered. */
+  ask?: (question: Question) => Promise<Answer>;
 }
 
 export interface PreferenceUpdate {
