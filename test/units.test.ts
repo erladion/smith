@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import OpenAI from "openai";
 import { chooseTail, SUMMARY_PREFIX, trimOldToolResults } from "../src/core/context.js";
+import { configDir, dataDir, moveOldFolders } from "../src/core/dirs.js";
 import { describeError } from "../src/core/errors.js";
 import type { Message } from "../src/core/history.js";
 import { defaultName, findSession, listSessions, secureSessions, Session, sessionsDir } from "../src/core/session.js";
@@ -118,8 +119,8 @@ describe("sessions", () => {
     try {
       savePreferences({ reasoning: "high" });
       assert.equal(loadPreferences().reasoning, "high");
-      assert.equal(mode(path.join(dataDir, "config", "agent", "preferences.json")), "600");
-      assert.equal(mode(path.join(dataDir, "config", "agent")), "700");
+      assert.equal(mode(path.join(dataDir, "config", "smith", "preferences.json")), "600");
+      assert.equal(mode(path.join(dataDir, "config", "smith")), "700");
       assert.equal(mode(path.join(dataDir, "config")), "755", "only the agent's own folder is made private");
     } finally {
       process.env.XDG_CONFIG_HOME = originalConfig;
@@ -220,5 +221,37 @@ describe("connection errors", () => {
 
   test("without a cause, the old message", () => {
     assert.match(describeError(new OpenAI.APIConnectionError({}), "u"), /Could not reach u\. Is the server running\?/);
+  });
+});
+
+describe("the rename from agent to Smith", () => {
+  test("moves the old folders once, and only when they hold agent's files", () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "smith-rename-"));
+    const saved = { config: process.env.XDG_CONFIG_HOME, data: process.env.XDG_DATA_HOME };
+    process.env.XDG_CONFIG_HOME = path.join(base, "config");
+    process.env.XDG_DATA_HOME = path.join(base, "data");
+    try {
+      fs.mkdirSync(path.join(base, "config", "agent"), { recursive: true });
+      fs.writeFileSync(path.join(base, "config", "agent", "config.json"), "{}");
+      fs.mkdirSync(path.join(base, "data", "agent", "sessions"), { recursive: true });
+      fs.writeFileSync(path.join(base, "data", "agent", "sessions", "s.jsonl"), "");
+
+      const notes = moveOldFolders();
+      assert.equal(notes.length, 2);
+      assert.match(notes[0]!, /agent is now called Smith/);
+      assert.ok(fs.existsSync(path.join(configDir(), "config.json")));
+      assert.ok(fs.existsSync(path.join(dataDir(), "sessions", "s.jsonl")));
+      assert.ok(!fs.existsSync(path.join(base, "config", "agent")));
+
+      // Done once: a later old folder (some other program's) is left alone.
+      fs.mkdirSync(path.join(base, "config", "agent"));
+      fs.writeFileSync(path.join(base, "config", "agent", "config.json"), "{}");
+      assert.deepEqual(moveOldFolders(), []);
+      assert.ok(fs.existsSync(path.join(base, "config", "agent", "config.json")));
+    } finally {
+      process.env.XDG_CONFIG_HOME = saved.config;
+      process.env.XDG_DATA_HOME = saved.data;
+      fs.rmSync(base, { recursive: true, force: true });
+    }
   });
 });

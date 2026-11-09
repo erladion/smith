@@ -1,6 +1,6 @@
 {
-  "name": "agent",
-  "version": "0.10.0",
+  "name": "smith",
+  "version": "0.11.0",
   "description": "A small agentic coding harness with a terminal UI for OpenAI-compatible endpoints",
   "scripts": {
     "dev": "tsx src/cli.ts",
@@ -26,7 +26,7 @@
     "typescript": "^7.0.2"
   },
   "bin": {
-    "agent": "dist/cli.js"
+    "smith": "dist/cli.js"
   },
   "engines": {
     "node": ">=22"

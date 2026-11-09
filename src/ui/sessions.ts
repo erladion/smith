@@ -72,7 +72,7 @@ export class SessionCommands {
       });
     }
     this.sessions.rename(name);
-    const resume = /\s/.test(name) ? `agent --resume "${name}"` : `agent --resume ${name}`;
+    const resume = /\s/.test(name) ? `smith --resume "${name}"` : `smith --resume ${name}`;
     app.print({ kind: "notice", level: "info", text: `Named this session "${name}". Resume it from anywhere with: ${resume}` });
   }
 

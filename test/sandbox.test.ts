@@ -168,6 +168,23 @@ describe("bash in the sandbox", { skip: !available && "bwrap is not available" }
     assert.equal((await call(grep, { pattern: "PRIVATE KEY", path: ".ssh" })).content, "No matches.");
   });
 
+  test("the file tools can read the session's /tmp, without asking", async () => {
+    const sandbox = Sandbox.create("on", false);
+    const ctx = { cwd: project, signal: new AbortController().signal, sandbox };
+    const call = (tool: ToolDef, input: unknown) => tool.run(tool.schema.parse(input), ctx);
+    const reason = (tool: ToolDef, input: unknown) => tool.approvalReason?.(tool.schema.parse(input), ctx);
+    await call(bash, { command: `mkdir -p /tmp/out && echo "error: boom" > /tmp/out/log.txt && ln -s /usr/share /tmp/away` });
+
+    assert.equal(await reason(readFile, { path: "/tmp/out/log.txt" }), undefined, "no approval needed");
+    assert.match((await call(readFile, { path: "/tmp/out/log.txt" })).content, /^1\terror: boom$/);
+    assert.match((await call(glob, { pattern: "*.txt", path: "/tmp/out" })).content, /log\.txt/);
+    assert.match((await call(grep, { pattern: "boom", path: "/tmp/out" })).content, /log\.txt:1:error: boom/);
+    // A link out of it is a read outside the project, which asks.
+    assert.ok(await reason(readFile, { path: "/tmp/away/x" }));
+    // Without a sandbox, /tmp is the machine's own and stays off limits.
+    await assert.rejects(readFile.run(readFile.schema.parse({ path: "/tmp/out/log.txt" }), { cwd: project, signal: ctx.signal }), /off limits/);
+  });
+
   test("a timed-out command is killed with everything it started", async () => {
     const started = Date.now();
     const res = await run("sleep 30 & sleep 30", { timeout_ms: 300 });

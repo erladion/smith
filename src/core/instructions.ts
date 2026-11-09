@@ -20,7 +20,7 @@ export function findRepoRoot(cwd: string): string | undefined {
 /**
  * Instruction files for the system prompt, most general first:
  *
- * 1. ~/.config/agent/AGENTS.md, your personal instructions for every project.
+ * 1. ~/.config/smith/AGENTS.md, your personal instructions for every project.
  * 2. AGENTS.md in each folder from the repository root down to `cwd`, so a
  *    subproject can add to the repository's instructions. Outside a
  *    repository, only `cwd` is checked.

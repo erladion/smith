@@ -11,7 +11,7 @@ import { OUTSIDE } from "./files.js";
 
 /** Approval reason for searching a path outside the project. */
 async function outsideReason(p: string | undefined, ctx: ToolContext): Promise<string | undefined> {
-  return p && (await resolveForRead(ctx.cwd, p)).outside ? OUTSIDE : undefined;
+  return p && (await resolveForRead(ctx.cwd, p, ctx.sandbox)).outside ? OUTSIDE : undefined;
 }
 
 const MAX_OUTPUT_CHARS = 15_000;
@@ -40,7 +40,7 @@ export const grep = defineTool({
     [`/${pattern}/`, p && `in ${p}`, glob && `(${glob})`].filter(Boolean).join(" "),
   approvalReason: ({ path: p }, ctx) => outsideReason(p, ctx),
   async run(input, ctx) {
-    const target = input.path ? path.relative(ctx.cwd, (await resolveForRead(ctx.cwd, input.path)).path) || "." : ".";
+    const target = input.path ? path.relative(ctx.cwd, (await resolveForRead(ctx.cwd, input.path, ctx.sandbox)).path) || "." : ".";
     // ripgrep when installed (much faster, respects .gitignore), else grep.
     const { rg } = fastTools();
     const sandbox = ctx.sandbox ?? Sandbox.none();
@@ -74,12 +74,12 @@ export const glob = defineTool({
     if (path.isAbsolute(pattern) || pattern.split("/").includes("..")) {
       return { content: "The pattern must be relative and must not contain '..'. Use path to choose where to search.", isError: true };
     }
-    const base = (await resolveForRead(ctx.cwd, p ?? ".")).path;
+    const sandbox = ctx.sandbox ?? Sandbox.none();
+    const base = (await resolveForRead(ctx.cwd, p ?? ".", sandbox)).path;
     const regex = globToRegExp(pattern);
     const matches: { file: string; mtime: number }[] = [];
 
     const { rg } = fastTools();
-    const sandbox = ctx.sandbox ?? Sandbox.none();
     // Listed inside the sandbox when it's active, so hidden folders stay hidden.
     const files = rg
       ? listFiles(sandbox.programSpec(rg, ripgrepListArgs(), ctx.cwd, { chdir: base }), base, ctx.signal)
@@ -88,7 +88,8 @@ export const glob = defineTool({
         : walk(base, ctx.signal);
     for await (const { rel, abs } of files) {
       if (!regex.test(rel)) continue;
-      const stat = await fs.stat(abs).catch(() => null);
+      // The sandbox's /tmp is somewhere else on the host.
+      const stat = await fs.stat(sandbox.tempPath(abs, ctx.cwd)?.host ?? abs).catch(() => null);
       if (!stat?.isFile()) continue;
       matches.push({ file: path.relative(ctx.cwd, abs), mtime: stat.mtimeMs });
       // Collect a few more than we show so the newest files are likely among them.
@@ -148,7 +149,9 @@ function findArgs(): string[] {
 
 /** Runs a file lister in `base` and yields the paths it prints, one per line (relative, maybe "./"-prefixed). */
 async function* listFiles(spec: SpawnSpec, base: string, signal: AbortSignal): AsyncGenerator<{ rel: string; abs: string }> {
-  const child = spawn(spec.file, spec.args, { cwd: base, env: spec.env, signal, stdio: ["ignore", "pipe", "ignore"] });
+  // In the sandbox, bwrap changes to `base` itself, which may exist only there (its /tmp).
+  const cwd = spec.file === "bwrap" ? undefined : base;
+  const child = spawn(spec.file, spec.args, { cwd, env: spec.env, signal, stdio: ["ignore", "pipe", "ignore"] });
   child.on("error", () => {}); // Aborted or missing; the stream simply ends.
   let pending = "";
   let read = 0;

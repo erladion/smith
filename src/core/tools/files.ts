@@ -29,9 +29,9 @@ export const readFile = defineTool({
   readOnly: true,
   summarize: ({ path: p, offset, limit }) =>
     offset || limit ? `${p} (lines ${offset ?? 1}-${(offset ?? 1) + (limit ?? DEFAULT_LINE_LIMIT) - 1})` : p,
-  approvalReason: async ({ path: p }, ctx) => ((await resolveForRead(ctx.cwd, p)).outside ? OUTSIDE : undefined),
+  approvalReason: async ({ path: p }, ctx) => ((await resolveForRead(ctx.cwd, p, ctx.sandbox)).outside ? OUTSIDE : undefined),
   async run({ path: p, offset = 1, limit = DEFAULT_LINE_LIMIT }, ctx) {
-    const file = (await resolveForRead(ctx.cwd, p)).path;
+    const file = (await resolveForRead(ctx.cwd, p, ctx.sandbox)).path;
     const text = await read(file, ctx);
     if (text.includes("\0")) return { content: `${p} looks like a binary file.`, isError: true };
 

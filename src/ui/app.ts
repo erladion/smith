@@ -691,7 +691,7 @@ export class TuiApp implements UiContext {
   private listSkills(): void {
     const { skills } = this.project;
     if (skills.length === 0) {
-      return this.print({ kind: "notice", level: "info", text: "No skills found. Add folders with a SKILL.md to .agents/skills/ in the project or ~/.config/agent/skills/." });
+      return this.print({ kind: "notice", level: "info", text: "No skills found. Add folders with a SKILL.md to .agents/skills/ in the project or ~/.config/smith/skills/." });
     }
     this.print({ kind: "notice", level: "info", text: skills.map((s) => `${s.name}: ${s.description.replace(/\s+/g, " ")}`).join("\n") });
   }

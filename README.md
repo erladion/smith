@@ -1,7 +1,11 @@
-# agent
+# Smith
 
 A small agentic coding harness with a terminal UI. It talks to any OpenAI-compatible
 `/v1/chat/completions` endpoint, such as llama.cpp's `llama-server`, vLLM, Ollama, or LM Studio.
+
+Smith used to be called `agent`. On first start it moves `~/.config/agent` and
+`~/.local/share/agent` to their new names, so config, sessions and logs carry over, and it still
+reads the old `AGENT_BASE_URL`, `AGENT_API_KEY` and `AGENT_MODEL` if the `SMITH_` ones aren't set.
 
 ## Requirements
 
@@ -16,7 +20,7 @@ The only npm runtime dependencies are `openai` and `zod`, neither of which has d
 
 There are two builds of the same app:
 
-| | `npm run build:binary` → `build/agent` | `npm run build:binary:bun` → `build/agent-bun` |
+| | `npm run build:binary` → `build/smith` | `npm run build:binary:bun` → `build/smith-bun` |
 |---|---|---|
 | Runtime inside | Node.js | Bun (baseline build: any x86-64 CPU) |
 | Size | ~145 MB | ~105 MB |
@@ -26,14 +30,14 @@ Both are checked on RHEL 9 by the release workflow: the Bun build on the minimal
 nothing installed. Bun comes from npm as a dev dependency, so offline builds work from the npm
 cache as before (the cache grows by about 100 MB).
 
-The Node build, `build/agent`, is one executable containing Node.js and the bundled app. Copy it to the target machine and run it; it needs no Node, npm or
+The Node build, `build/smith`, is one executable containing Node.js and the bundled app. Copy it to the target machine and run it; it needs no Node, npm or
 `node_modules` there.
 
 - Building needs Node 26 or newer (for `node --build-sea`). The target needs no Node at all.
 - The binary is for the OS and CPU it was built on, e.g. Linux x64. It needs glibc 2.28 or
   newer (RHEL 9 has 2.34) and `libatomic`, which RHEL 9 doesn't install by default; without
   it the binary won't start: `sudo dnf install libatomic`. (Checked on RHEL 9.8.)
-- `agent --version` shows the version it was built as.
+- `smith --version` shows the version it was built as.
 
 ## Releases
 
@@ -46,16 +50,16 @@ git tag v0.2.0 && git push origin v0.2.0
 
 The workflow typechecks, runs the tests (with bubblewrap, so the sandbox tests run too),
 builds the binary, checks that it starts on RHEL 9 (Red Hat's UBI 9 image), and publishes a
-GitHub release with both builds, `agent-<version>-linux-x64.tar.gz` (Node) and
-`agent-<version>-linux-x64-bun.tar.gz` (Bun), each holding the binary and this README, plus
+GitHub release with both builds, `smith-<version>-linux-x64.tar.gz` (Node) and
+`smith-<version>-linux-x64-bun.tar.gz` (Bun), each holding the binary and this README, plus
 `SHA256SUMS`. A tag that doesn't match
 `package.json` fails the run. Running the workflow by hand from the Actions tab builds and tests
 without releasing, and keeps the binary as a workflow artifact. To install a release:
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf agent-*-linux-x64.tar.gz
-sudo install agent-*-linux-x64/agent /usr/local/bin/
+tar -xzf smith-*-linux-x64.tar.gz
+sudo install smith-*-linux-x64/smith /usr/local/bin/
 sudo dnf install libatomic bubblewrap
 ```
 - bubblewrap is still needed on the target for the shell sandbox.
@@ -80,7 +84,7 @@ npm run dev -- -p "list the TODOs in src" --yes   # headless, one prompt
 npm run dev -- -c                             # resume the last session in this directory
 ```
 
-`npm run dev -- --help` lists every flag. `agent <folder>` works in that folder instead of the
+`npm run dev -- --help` lists every flag. `smith <folder>` works in that folder instead of the
 current directory; the folder you work in is the project, the only place the agent can change
 files. `--resume <id>` goes back to the folder the session was in.
 
@@ -100,7 +104,7 @@ Connections to the model server work like `curl` on the same machine:
 
 ## Endpoints
 
-Servers you use regularly go in `~/.config/agent/config.json`:
+Servers you use regularly go in `~/.config/smith/config.json`:
 
 ```json
 {
@@ -133,8 +137,8 @@ Raise it for long autonomous tasks; when it stops, sending "continue" gives it a
 
 `--endpoints` lists them, `-e <name>` starts on one, and `/endpoint` switches mid-conversation.
 Without `-e`, the agent starts on the resumed session's endpoint, else the one used last, else
-`default`. `--base-url` (or `AGENT_BASE_URL`) bypasses the config for a one-off server, and only
-then are `AGENT_API_KEY`/`OPENAI_API_KEY` used: keys from your environment are never sent to a
+`default`. `--base-url` (or `SMITH_BASE_URL`) bypasses the config for a one-off server, and only
+then are `SMITH_API_KEY`/`OPENAI_API_KEY` used: keys from your environment are never sent to a
 configured endpoint they weren't set for. The file is only read, never written.
 
 ## In the TUI
@@ -194,7 +198,7 @@ bothers you in your shell, send `"\\\r"` (backslash, Enter) instead, which the a
 as a new line and bash treats as a line continuation.
 
 The last endpoint, model (per server) and reasoning level are
-remembered in `~/.config/agent/preferences.json`, which the agent writes itself.
+remembered in `~/.config/smith/preferences.json`, which the agent writes itself.
 
 ### Reasoning levels
 
@@ -210,7 +214,7 @@ separates it, or from inline `<think>...</think>` tags when it doesn't.
 ## Project instructions and skills
 
 **Instructions.** `AGENTS.md` files are added to the system prompt, most general first:
-`~/.config/agent/AGENTS.md` (your own rules for every project), then one in each folder from the
+`~/.config/smith/AGENTS.md` (your own rules for every project), then one in each folder from the
 repository root down to the working directory. A folder without `AGENTS.md` can use `CLAUDE.md`
 instead. Put the build and test commands and the project's conventions here; small local
 models benefit the most.
@@ -228,7 +232,7 @@ Use 4-space indentation...
 Only each skill's name and description go into the prompt. The model loads the full
 instructions with the `skill` tool when a task matches, and can read the skill's other files
 the same way. Skills are found in `.agents/skills/` and `.claude/skills/` at the repository
-root, then `~/.config/agent/skills/` and `~/.claude/skills/`; a project skill overrides a
+root, then `~/.config/smith/skills/` and `~/.claude/skills/`; a project skill overrides a
 personal one with the same name. Skill folders are visible read-only inside the sandbox, so
 their scripts can run.
 
@@ -272,7 +276,7 @@ alone. Undo history lives in memory, so it doesn't survive a restart or a compac
 
 ## Sessions
 
-Every conversation is saved as an append-only JSONL log in `~/.local/share/agent/sessions/`.
+Every conversation is saved as an append-only JSONL log in `~/.local/share/smith/sessions/`.
 Session files are readable by you only (600, folders 700); files from older versions are
 tightened the next time the agent starts.
 
@@ -280,10 +284,10 @@ Each session has a name: the first line of your first message, until you give it
 `/name`. Naming a session saves it right away, even before its first message.
 
 ```sh
-agent --sessions                 # every session from every folder: name, folder, last used, size, model, id
-agent ~/git/webapp --sessions    # only that folder's
-agent --resume login-fix         # by name or id, from anywhere: it goes back to the session's folder
-agent -c                         # the latest session in the current folder
+smith --sessions                 # every session from every folder: name, folder, last used, size, model, id
+smith ~/git/webapp --sessions    # only that folder's
+smith --resume login-fix         # by name or id, from anywhere: it goes back to the session's folder
+smith -c                         # the latest session in the current folder
 ```
 
 In the TUI, `/sessions` switches between this folder's sessions, `/sessions all` between every
@@ -294,7 +298,7 @@ available.
 ## Tool log
 
 Every tool call is also logged, one JSON object per line, to
-`~/.local/share/agent/logs/<session id>.jsonl` (readable by you only, like sessions). A line
+`~/.local/share/smith/logs/<session id>.jsonl` (readable by you only, like sessions). A line
 says when the call started, which session and folder it ran in, the tool and its arguments,
 how approval went, how it ended and how long it took, and its output (cut at 10,000
 characters; the session keeps all of it). Calls made by sub-agents carry `"subagent"`.
@@ -313,7 +317,7 @@ Compaction doesn't touch the log, so it keeps everything the agent did. Nothing 
 logs; remove them when you like. For example, every shell command the agent ran:
 
 ```sh
-jq -c 'select(.tool == "bash") | [.time, .input.command, .status]' ~/.local/share/agent/logs/*.jsonl
+jq -c 'select(.tool == "bash") | [.time, .input.command, .status]' ~/.local/share/smith/logs/*.jsonl
 ```
 
 Set `"toolLog": false` in the config file to turn it off.
@@ -371,6 +375,10 @@ in your home folder, `/tmp`, `/run`, `/mnt`, the agent's own config and sessions
 `/proc`, `/sys` and `/dev`. Symlinks are resolved before the check, so a link in the project
 can't lead there. With `--sandbox off`, only these checks apply.
 
+With the sandbox, `/tmp` and `/var/tmp` are the session's private ones (below), so `read_file`,
+`grep` and `glob` read them without asking: a build log a command left there is one read away. A
+symlink in there that leads elsewhere counts as a read outside the project, and asks.
+
 ### Shell sandbox
 
 `bash` commands, and the file tools' reads and writes, run inside
@@ -402,4 +410,4 @@ later, and with the network on, commands can reach services on localhost.
 ## Scripts
 
 `npm run dev` (run from source), `npm test`, `npm run typecheck`, `npm run build` (writes `dist/`),
-`npm run build:binary` (writes `build/agent`).
+`npm run build:binary` (writes `build/smith`).

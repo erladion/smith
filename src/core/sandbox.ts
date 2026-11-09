@@ -31,7 +31,7 @@ const ENV_ALLOW =
   /^(PATH|HOME|USER|LOGNAME|SHELL|TERM|TZ|LANG|LANGUAGE|LC_[A-Z_]+|COLORTERM|NO_COLOR|FORCE_COLOR|CI|EDITOR|JAVA_HOME|GOPATH|GOROOT|CARGO_HOME|RUSTUP_HOME|VIRTUAL_ENV|CONDA_PREFIX|PYTHONPATH|NODE_PATH|GEM_HOME|GEM_PATH)$/;
 
 /** Variables holding this agent's own credentials, removed even when unsandboxed. */
-const AGENT_SECRETS = ["AGENT_API_KEY", "OPENAI_API_KEY"];
+const AGENT_SECRETS = ["SMITH_API_KEY", "AGENT_API_KEY", "OPENAI_API_KEY"];
 
 /** Replaced by empty directories. /tmp and /var/tmp become private scratch space (see TEMP_DIRS). */
 const HIDDEN_SYSTEM_DIRS = ["/tmp", "/var/tmp", "/run", "/mnt", "/media"];
@@ -67,7 +67,9 @@ const HIDDEN_HOME_PATHS = [
   ".local/share/fish/fish_history",
   ".claude",
   ".claude.json",
-  // This agent's own sessions and settings.
+  // Smith's own sessions and settings (and where they were before the rename).
+  ".config/smith",
+  ".local/share/smith",
   ".config/agent",
   ".local/share/agent",
 ];
@@ -184,10 +186,28 @@ export class Sandbox {
     if (code !== 0) throw fileError(stderr, file, "write");
   }
 
+  /**
+   * Where a path under the sandbox's /tmp or /var/tmp really is: in this
+   * run's private temp folder. Undefined for other paths, for the project and
+   * other folders mounted on top (a project can live under /tmp), or without
+   * a sandbox.
+   */
+  tempPath(p: string, project: string): { host: string; root: string } | undefined {
+    if (!this.active) return undefined;
+    const mounted = [project, ...this.readOnlyPaths].flatMap((dir) => [dir, realpath(dir) ?? dir]);
+    if (mounted.some((dir) => p === dir || p.startsWith(dir + "/"))) return undefined;
+    for (const [dir, name] of Object.entries(TEMP_DIRS)) {
+      if (p !== dir && !p.startsWith(dir + "/")) continue;
+      const root = path.join(this.privateTemp(), name);
+      return { host: path.join(root, p.slice(dir.length)), root };
+    }
+    return undefined;
+  }
+
   /** The host folder behind the sandbox's /tmp and /var/tmp: private to this run, removed at exit. */
   private privateTemp(): string {
     if (this.tempRoot) return this.tempRoot;
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-"));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "smith-"));
     for (const name of Object.values(TEMP_DIRS)) fs.mkdirSync(path.join(root, name), { mode: 0o700 });
     process.once("exit", () => removeTree(root));
     this.tempRoot = root;

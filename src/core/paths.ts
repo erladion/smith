@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { isHiddenFromAgent } from "./sandbox.js";
+import { isHiddenFromAgent, type Sandbox } from "./sandbox.js";
 
 /**
  * Resolves a model-supplied path against the working directory and rejects
@@ -45,18 +45,31 @@ export interface ReadTarget {
   path: string;
   /** Outside the project folder: reading it needs the user's approval. */
   outside: boolean;
+  /** Where the file really is, when that differs from `path` (the sandbox's private /tmp). */
+  hostPath?: string;
 }
 
 /**
  * Resolves a path for reading. Unlike writes, reads may leave the project
  * (absolute paths, `..`, `~/`), but never into places hidden from the agent,
  * checked both as written and with symlinks resolved.
+ *
+ * With a sandbox, /tmp and /var/tmp are the session's private ones (where
+ * commands leave build logs and the like): readable without asking, unless
+ * a symlink there leads somewhere else.
  */
-export async function resolveForRead(root: string, requested: string): Promise<ReadTarget> {
+export async function resolveForRead(root: string, requested: string, sandbox?: Sandbox): Promise<ReadTarget> {
   const expanded = requested === "~" || requested.startsWith("~/") ? path.join(os.homedir(), requested.slice(1)) : requested;
   const target = path.resolve(root, expanded);
   const real = await realpathAllowingMissing(target);
   if (isInside(await fs.realpath(root), real)) return { path: target, outside: false };
+  const temp = sandbox?.tempPath(target, root);
+  if (temp) {
+    const realTemp = await realpathAllowingMissing(temp.host);
+    if (isInside(await fs.realpath(temp.root), realTemp)) return { path: target, outside: false, hostPath: temp.host };
+    if (isHiddenFromAgent(realTemp)) throw new Error(`${requested} is off limits: it leads to a place hidden from the agent.`);
+    return { path: target, outside: true, hostPath: temp.host };
+  }
   if (isHiddenFromAgent(target) || isHiddenFromAgent(real)) {
     throw new Error(`${requested} is off limits: credentials, system files and the agent's own data are hidden from the agent.`);
   }

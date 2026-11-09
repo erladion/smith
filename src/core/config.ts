@@ -1,10 +1,10 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { configDir } from "./dirs.js";
 import { z } from "zod";
 
 /**
- * ~/.config/agent/config.json: named endpoints you can switch between.
+ * ~/.config/smith/config.json: named endpoints you can switch between.
  *
  *   {
  *     "default": "local",
@@ -37,7 +37,7 @@ const ConfigSchema = z.strictObject({
   default: z.string().optional(),
   maxSteps: z.number().int().min(1).max(10_000).optional().describe("Model calls allowed per message before the agent stops"),
   subagents: z.boolean().optional().describe("Give the model the task tool for read-only sub-agents (default true)"),
-  toolLog: z.boolean().optional().describe("Log every tool call to ~/.local/share/agent/logs (default true)"),
+  toolLog: z.boolean().optional().describe("Log every tool call to ~/.local/share/smith/logs (default true)"),
   theme: z.enum(["matrix", "plain"]).optional().describe("matrix: digital rain, katakana spinner and Agent Smith's lines (default); plain: none of it"),
   codeStream: z.boolean().optional().describe("With the matrix theme, a stream of glyphs at the end of the status line while idle (default true)"),
   endpoints: z.record(z.string(), EndpointSchema).default({}),
@@ -86,8 +86,7 @@ export const EXAMPLE_CONFIG = `{
 }`;
 
 export function configPath(): string {
-  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
-  return path.join(base, "agent", "config.json");
+  return path.join(configDir(), "config.json");
 }
 
 /** Loads the config file. A missing file means no endpoints; an invalid one is an error. */

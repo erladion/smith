@@ -1,6 +1,6 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { configDir } from "./dirs.js";
 import { privateDir, privateFile } from "./private.js";
 import { isReasoningLevel, type ReasoningLevel } from "./reasoning.js";
 
@@ -13,8 +13,7 @@ export interface Preferences {
 }
 
 function file(): string {
-  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
-  return path.join(base, "agent", "preferences.json");
+  return path.join(configDir(), "preferences.json");
 }
 
 export function loadPreferences(): Preferences {

@@ -24,12 +24,13 @@ import type { AgentHooks, AgentSettings, ProjectView } from "./ui/types.js";
 import { turnSummary } from "./ui/duration.js";
 import { shortPath } from "./ui/folders.js";
 import { farewell } from "./ui/greetings.js";
+import { moveOldFolders } from "./core/dirs.js";
 import { describeError } from "./core/errors.js";
 import { useSystemNetworkSettings } from "./core/network.js";
 import { ToolLog } from "./core/toollog.js";
 import { VERSION } from "./version.js";
 
-const HELP = `Usage: agent [options] [folder]
+const HELP = `Usage: smith [options] [folder]
 
 Works in [folder], or the current directory. That folder is the project: the only place the
 agent can change files.
@@ -37,9 +38,9 @@ agent can change files.
 Server:
   -e, --endpoint <name>  Use an endpoint from the config file (default: last used, else the config's default)
   --endpoints            List configured endpoints
-  --base-url <url>       Use this OpenAI-compatible URL instead of a configured endpoint (env AGENT_BASE_URL)
-  --api-key <key>        API key (for --base-url also env AGENT_API_KEY or OPENAI_API_KEY)
-  --model <name>         Model (env AGENT_MODEL; default: last used on this server, else the
+  --base-url <url>       Use this OpenAI-compatible URL instead of a configured endpoint (env SMITH_BASE_URL)
+  --api-key <key>        API key (for --base-url also env SMITH_API_KEY or OPENAI_API_KEY)
+  --model <name>         Model (env SMITH_MODEL; default: last used on this server, else the
                          endpoint's configured model, else the first listed)
   --reasoning <level>    ${REASONING_LEVELS.join(" | ")} (default: last used, else "default")
   --context-size <n>     Context window in tokens, if the server doesn't report it
@@ -54,7 +55,7 @@ Sandbox (shell commands run in bubblewrap):
 Sessions:
   -c, --continue         Resume the most recent session in this directory
   -r, --resume <id|name> Resume a session by id or name (in the folder it was in)
-  --sessions             List saved sessions from every folder (agent <folder> --sessions: only that one)
+  --sessions             List saved sessions from every folder (smith <folder> --sessions: only that one)
 
 One-shot:
   -p, --print <prompt>   Run one prompt without the TUI and print the answer
@@ -63,10 +64,11 @@ One-shot:
   -v, --version          Show the version
   -h, --help             Show this help
 
-Endpoints are configured in ~/.config/agent/config.json; run --endpoints for an example.`;
+Endpoints are configured in ~/.config/smith/config.json; run --endpoints for an example.`;
 
 async function main(): Promise<void> {
   useSystemNetworkSettings();
+  for (const note of moveOldFolders()) process.stderr.write(`${note}\n`);
   secureSessions();
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -96,7 +98,7 @@ async function main(): Promise<void> {
     return;
   }
   if (values.version) {
-    console.log(`agent ${VERSION}`);
+    console.log(`smith ${VERSION}`);
     return;
   }
 
@@ -134,6 +136,8 @@ async function main(): Promise<void> {
   const reasoning = resolveReasoning(values.reasoning, prefs.reasoning);
   const model =
     values.model ??
+    // The AGENT_ names are from before the rename.
+    process.env.SMITH_MODEL ??
     process.env.AGENT_MODEL ??
     (await server.chooseModel([resumed?.session.model, prefs.models?.[server.baseURL]]));
   const contextSize = parseNumber(values["context-size"], "--context-size") ?? (await server.contextSize(model));
@@ -243,7 +247,7 @@ async function main(): Promise<void> {
   }).run();
   const resumeWith = session.name && !/\s/.test(session.name) ? session.name : session.id;
   const goodbye = config.theme === "matrix" ? `${farewell(Date.now() - tuiStarted)}\n` : "";
-  console.log(`${goodbye}Session ${session.name ? `"${session.name}" ` : ""}${session.id}. Resume with: agent --resume ${resumeWith}`);
+  console.log(`${goodbye}Session ${session.name ? `"${session.name}" ` : ""}${session.id}. Resume with: smith --resume ${resumeWith}`);
 }
 
 interface Project {
@@ -305,7 +309,7 @@ const DEFAULT_BASE_URL = "http://localhost:8080/v1";
 
 /**
  * Which server to start on: --endpoint, then an explicit URL (--base-url or
- * AGENT_BASE_URL), then the resumed session's endpoint, the last one used,
+ * SMITH_BASE_URL), then the resumed session's endpoint, the last one used,
  * the config's default, the first configured, and finally localhost:8080.
  */
 function chooseServer(
@@ -326,8 +330,8 @@ function chooseServer(
     return Server.fromEndpoint(endpoint, keyFlag);
   }
 
-  const url = flags["base-url"] ?? process.env.AGENT_BASE_URL;
-  const envKey = keyFlag ?? process.env.AGENT_API_KEY ?? process.env.OPENAI_API_KEY ?? "no-key";
+  const url = flags["base-url"] ?? process.env.SMITH_BASE_URL ?? process.env.AGENT_BASE_URL;
+  const envKey = keyFlag ?? process.env.SMITH_API_KEY ?? process.env.AGENT_API_KEY ?? process.env.OPENAI_API_KEY ?? "no-key";
   if (url) return new Server(url, envKey);
 
   const endpoint =
@@ -369,7 +373,7 @@ function printSessions(cwd: string | undefined): void {
   const fit = (cells: string[]) => cells.map((c, i) => (c.length > widths[i]! ? `${c.slice(0, widths[i]! - 1)}…` : c.padEnd(widths[i]!))).join("  ").trimEnd();
   console.log(fit(header));
   for (const row of rows) console.log(fit(row));
-  console.log(`\n${sessions.length} session${sessions.length === 1 ? "" : "s"}. Resume one with: agent --resume <id or name>`);
+  console.log(`\n${sessions.length} session${sessions.length === 1 ? "" : "s"}. Resume one with: smith --resume <id or name>`);
 }
 
 async function runHeadless(

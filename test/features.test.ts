@@ -113,7 +113,7 @@ describe("skills and instructions", () => {
 
   test("instructions come from the personal file and each folder up to the repo root", () => {
     const repo = path.join(dir, "repo");
-    write(path.join(dir, "config", "agent", "AGENTS.md"), "personal rules");
+    write(path.join(dir, "config", "smith", "AGENTS.md"), "personal rules");
     write(path.join(repo, ".git", "HEAD"), "");
     write(path.join(repo, "AGENTS.md"), "repo rules");
     write(path.join(repo, "pkg", "CLAUDE.md"), "package rules (CLAUDE.md fallback)");

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { dataDir } from "./dirs.js";
 import { SUMMARY_PREFIX } from "./context.js";
 import { privateDir, privateFile, privateTree } from "./private.js";
 import { type HistoryChange, type Message, messageText } from "./history.js";
@@ -46,8 +46,7 @@ export interface SessionInfo {
 }
 
 export function sessionsDir(): string {
-  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
-  return path.join(base, "agent", "sessions");
+  return path.join(dataDir(), "sessions");
 }
 
 export class Session {
@@ -222,7 +221,7 @@ export function findSession(idOrName: string): string {
   if (matches.length > 1) {
     throw new Error(`Several sessions are named "${idOrName}"; resume one by id:\n${matches.map((s) => `  ${s.id}  ${s.cwd}`).join("\n")}`);
   }
-  throw new Error(`No session with the id or name "${idOrName}". agent --sessions lists them.`);
+  throw new Error(`No session with the id or name "${idOrName}". smith --sessions lists them.`);
 }
 
 /** One line from a session's first message; after compaction, the message following the summary. */

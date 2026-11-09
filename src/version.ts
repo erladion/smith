@@ -1,4 +1,4 @@
 // Replaced with the release version when the binary is built (scripts/build-binary.mjs).
-declare const __AGENT_VERSION__: string | undefined;
+declare const __SMITH_VERSION__: string | undefined;
 
-export const VERSION = typeof __AGENT_VERSION__ === "string" ? __AGENT_VERSION__ : "dev";
+export const VERSION = typeof __SMITH_VERSION__ === "string" ? __SMITH_VERSION__ : "dev";
