@@ -1,14 +1,17 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 /**
- * Runs shell commands inside bubblewrap (bwrap), the same unprivileged
- * sandbox Flatpak uses. Inside the sandbox:
+ * Runs shell commands, and the file tools' reads and writes, inside
+ * bubblewrap (bwrap), the same unprivileged sandbox Flatpak uses. Inside the
+ * sandbox:
  *
  * - The whole filesystem is read-only, except the project directory and a
- *   private, empty /tmp.
+ *   private /tmp (and /var/tmp). That /tmp starts empty and is kept for as
+ *   long as the agent runs, so one command can use what another left there;
+ *   it's deleted when the agent exits.
  * - Credentials and history in the home directory (~/.ssh, ~/.aws, shell
  *   history, ...) are hidden, as are /run (Docker, Podman and D-Bus sockets)
  *   and /mnt (Windows drives and the WSL interop socket on WSL).
@@ -30,8 +33,11 @@ const ENV_ALLOW =
 /** Variables holding this agent's own credentials, removed even when unsandboxed. */
 const AGENT_SECRETS = ["AGENT_API_KEY", "OPENAI_API_KEY"];
 
-/** Replaced by empty directories. /tmp and /var/tmp become private scratch space. */
+/** Replaced by empty directories. /tmp and /var/tmp become private scratch space (see TEMP_DIRS). */
 const HIDDEN_SYSTEM_DIRS = ["/tmp", "/var/tmp", "/run", "/mnt", "/media"];
+
+/** The temp directories, and the folder under the agent's private temp folder that stands in for each. */
+const TEMP_DIRS: Record<string, string> = { "/tmp": "tmp", "/var/tmp": "var-tmp" };
 
 /** Relative to the home directory. */
 const HIDDEN_HOME_PATHS = [
@@ -94,6 +100,8 @@ export class Sandbox {
    * folders, so a skill's scripts can run even from a hidden ~/.claude.
    */
   readOnlyPaths: string[] = [];
+  /** The host folder holding the private /tmp and /var/tmp, made on first use. */
+  private tempRoot: string | undefined;
 
   private constructor(
     readonly active: boolean,
@@ -132,18 +140,113 @@ export class Sandbox {
 
   /** How to spawn `command` with bash in `cwd`, inside the sandbox when it's active. */
   spawnSpec(command: string, cwd: string): SpawnSpec {
+    return this.programSpec("bash", ["-c", command], cwd, { network: this.network });
+  }
+
+  /**
+   * How to run a program directly (no shell), inside the sandbox when it's
+   * active. `project` is the one writable folder; the program starts in
+   * `chdir` (default: the project). No network unless asked for.
+   */
+  programSpec(file: string, args: string[], project: string, opts: { chdir?: string; network?: boolean } = {}): SpawnSpec {
     if (!this.active) {
       const env = { ...process.env };
       for (const name of AGENT_SECRETS) delete env[name];
-      return { file: "bash", args: ["-c", command], env };
+      return { file, args, env };
     }
     const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => ENV_ALLOW.test(k)));
     env.TMPDIR = "/tmp";
-    return { file: "bwrap", args: [...bwrapArgs(cwd, this.network, this.readOnlyPaths), "--", "bash", "-c", command], env };
+    const sandboxArgs = bwrapArgs(project, {
+      network: opts.network ?? false,
+      readOnlyPaths: this.readOnlyPaths,
+      tempRoot: this.privateTemp(),
+      chdir: opts.chdir,
+    });
+    return { file: "bwrap", args: [...sandboxArgs, "--", file, ...args], env };
+  }
+
+  /** Reads a file as sandboxed commands see it. Errors carry `code` (ENOENT, EISDIR, ...) like fs errors. */
+  async readFile(file: string, project: string): Promise<string> {
+    if (!this.active) return fs.promises.readFile(file, "utf8");
+    const { code, stdout, stderr } = await run(this.programSpec("cat", ["--", file], project));
+    if (code !== 0) throw fileError(stderr, file, "open");
+    return stdout.toString("utf8");
+  }
+
+  /** Writes a file, creating its folder, inside the sandbox: only the project (and the private /tmp) are writable. */
+  async writeFile(file: string, content: string, project: string): Promise<void> {
+    if (!this.active) {
+      await fs.promises.mkdir(path.dirname(file), { recursive: true });
+      return fs.promises.writeFile(file, content, "utf8");
+    }
+    const script = 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"';
+    const { code, stderr } = await run(this.programSpec("bash", ["-c", script, "bash", file], project), content);
+    if (code !== 0) throw fileError(stderr, file, "write");
+  }
+
+  /** The host folder behind the sandbox's /tmp and /var/tmp: private to this run, removed at exit. */
+  private privateTemp(): string {
+    if (this.tempRoot) return this.tempRoot;
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-"));
+    for (const name of Object.values(TEMP_DIRS)) fs.mkdirSync(path.join(root, name), { mode: 0o700 });
+    process.once("exit", () => removeTree(root));
+    this.tempRoot = root;
+    return root;
   }
 }
 
-export function bwrapArgs(cwdGiven: string, network: boolean, readOnlyPaths: string[] = []): string[] {
+/** Runs a spawn spec to completion, with `input` on stdin. */
+function run(spec: SpawnSpec, input?: string): Promise<{ code: number | null; stdout: Buffer; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(spec.file, spec.args, { env: spec.env, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
+    const out: Buffer[] = [];
+    let stderr = "";
+    child.stdout!.on("data", (c: Buffer) => out.push(c));
+    child.stderr!.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
+    child.on("error", (err) => resolve({ code: null, stdout: Buffer.alloc(0), stderr: err.message }));
+    child.on("close", (code) => resolve({ code, stdout: Buffer.concat(out), stderr }));
+    if (input !== undefined) {
+      child.stdin!.on("error", () => {}); // It exited early; the exit code says why.
+      child.stdin!.end(input);
+    }
+  });
+}
+
+/** An fs-style error (with `code`) from what cat, mkdir or bash printed. */
+function fileError(stderr: string, file: string, op: "open" | "write"): NodeJS.ErrnoException {
+  const known: [RegExp, string, string][] = [
+    [/No such file or directory/, "ENOENT", `ENOENT: no such file or directory, ${op} '${file}'`],
+    [/Is a directory/, "EISDIR", `EISDIR: illegal operation on a directory, ${op} '${file}'`],
+    [/Not a directory/, "ENOTDIR", `ENOTDIR: not a directory, ${op} '${file}'`],
+    [/Permission denied/, "EACCES", `EACCES: permission denied, ${op} '${file}'`],
+    [/Read-only file system/, "EROFS", `Can't write ${file}: the sandbox only allows writes inside the project and /tmp.`],
+  ];
+  const match = known.find(([pattern]) => pattern.test(stderr));
+  if (!match) return new Error(stderr.trim() || `Could not ${op === "open" ? "read" : "write"} ${file}`);
+  return Object.assign(new Error(match[2]), { code: match[1] });
+}
+
+/** Deletes a folder even when it holds read-only directories (as some build tools leave). */
+function removeTree(dir: string): void {
+  spawnSync("chmod", ["-R", "u+w", dir], { stdio: "ignore" });
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // Best effort: it's under the system temp folder.
+  }
+}
+
+export interface BwrapOptions {
+  network: boolean;
+  /** Extra folders made visible read-only, after the hiding rules. */
+  readOnlyPaths?: string[];
+  /** Host folder whose tmp/ and var-tmp/ become /tmp and /var/tmp; without it they're empty and per command. */
+  tempRoot?: string;
+  /** Where the command starts; the project by default. */
+  chdir?: string;
+}
+
+export function bwrapArgs(cwdGiven: string, { network, readOnlyPaths = [], tempRoot, chdir }: BwrapOptions): string[] {
   // bwrap mounts at paths as given and can't create mount points through
   // symlinks, so every path is resolved to where it really is first.
   const cwd = realpath(cwdGiven) ?? cwdGiven;
@@ -154,7 +257,10 @@ export function bwrapArgs(cwdGiven: string, network: boolean, readOnlyPaths: str
   // Mounts apply in order, each on top of the previous ones.
   args.push("--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc");
   for (const dir of HIDDEN_SYSTEM_DIRS) {
-    if (isDirectory(dir)) args.push("--tmpfs", dir);
+    if (!isDirectory(dir)) continue;
+    const temp = TEMP_DIRS[dir];
+    if (temp && tempRoot) args.push("--bind", path.join(tempRoot, temp), dir);
+    else args.push("--tmpfs", dir);
   }
 
   // The one writable place. Bound after the system masks so a project under
@@ -184,7 +290,7 @@ export function bwrapArgs(cwdGiven: string, network: boolean, readOnlyPaths: str
     }
   }
 
-  args.push("--chdir", cwd);
+  args.push("--chdir", chdir ?? cwd);
   return args;
 }
 

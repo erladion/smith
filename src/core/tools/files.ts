@@ -1,14 +1,19 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import { z } from "zod";
 import { assertWritable, resolveForRead, resolveInRoot } from "../paths.js";
 import { diffLines, diffStats } from "../diff.js";
+import { Sandbox } from "../sandbox.js";
 import { defineTool, type ToolContext, truncate } from "../tool.js";
 
 const MAX_OUTPUT_CHARS = 20_000;
 const DEFAULT_LINE_LIMIT = 500;
 const MAX_LINE_CHARS = 1_000;
 export const OUTSIDE = "Reads outside the project folder.";
+
+// Reads and writes happen inside the sandbox when it's active, so the file
+// tools can reach exactly what shell commands can. The path checks below
+// come first, for clear errors; the sandbox enforces them.
+const sandboxOf = (ctx: ToolContext) => ctx.sandbox ?? Sandbox.none();
+const read = (file: string, ctx: ToolContext) => sandboxOf(ctx).readFile(file, ctx.cwd);
 
 export const readFile = defineTool({
   name: "read_file",
@@ -27,7 +32,7 @@ export const readFile = defineTool({
   approvalReason: async ({ path: p }, ctx) => ((await resolveForRead(ctx.cwd, p)).outside ? OUTSIDE : undefined),
   async run({ path: p, offset = 1, limit = DEFAULT_LINE_LIMIT }, ctx) {
     const file = (await resolveForRead(ctx.cwd, p)).path;
-    const text = await fs.readFile(file, "utf8");
+    const text = await read(file, ctx);
     if (text.includes("\0")) return { content: `${p} looks like a binary file.`, isError: true };
 
     const lines = text.split("\n");
@@ -59,7 +64,7 @@ const writeSchema = z.object({
 async function planWrite({ path: p, content }: z.output<typeof writeSchema>, ctx: ToolContext) {
   const file = await resolveInRoot(ctx.cwd, p);
   assertWritable(ctx.cwd, file);
-  const before = await readIfExists(file);
+  const before = await readIfExists(file, ctx);
   return { file, content, created: before === null, diff: diffLines(before ?? "", content) };
 }
 
@@ -74,8 +79,7 @@ export const writeFile = defineTool({
   async run(input, ctx) {
     const plan = await planWrite(input, ctx);
     await ctx.beforeWrite?.(plan.file);
-    await fs.mkdir(path.dirname(plan.file), { recursive: true });
-    await fs.writeFile(plan.file, plan.content, "utf8");
+    await sandboxOf(ctx).writeFile(plan.file, plan.content, ctx.cwd);
     ctx.afterWrite?.(plan.file, plan.content);
     const { added, removed } = diffStats(plan.diff);
     const verb = plan.created ? "Created" : "Wrote";
@@ -95,7 +99,7 @@ async function planEdit({ path: p, old_string, new_string, replace_all }: z.outp
   if (old_string === new_string) throw new Error("old_string and new_string are identical; nothing to change.");
   const file = await resolveInRoot(ctx.cwd, p);
   assertWritable(ctx.cwd, file);
-  const text = await fs.readFile(file, "utf8");
+  const text = await read(file, ctx);
   const count = text.split(old_string).length - 1;
   if (count === 0) throw new Error(`old_string was not found in ${p}. Read the file and copy the text exactly.`);
   if (count > 1 && !replace_all) {
@@ -127,7 +131,7 @@ export const editFile = defineTool({
       return { content: (err as Error).message, isError: true };
     }
     await ctx.beforeWrite?.(plan.file);
-    await fs.writeFile(plan.file, plan.updated, "utf8");
+    await sandboxOf(ctx).writeFile(plan.file, plan.updated, ctx.cwd);
     ctx.afterWrite?.(plan.file, plan.updated);
     const { added, removed } = diffStats(plan.diff);
     const times = plan.replaced === 1 ? "1 occurrence" : `${plan.replaced} occurrences`;
@@ -135,9 +139,9 @@ export const editFile = defineTool({
   },
 });
 
-async function readIfExists(file: string): Promise<string | null> {
+async function readIfExists(file: string, ctx: ToolContext): Promise<string | null> {
   try {
-    return await fs.readFile(file, "utf8");
+    return await read(file, ctx);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;

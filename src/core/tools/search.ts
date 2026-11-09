@@ -4,6 +4,7 @@ import path from "node:path";
 import { z } from "zod";
 import { globToRegExp } from "../glob.js";
 import { resolveForRead } from "../paths.js";
+import { Sandbox, type SpawnSpec } from "../sandbox.js";
 import { fastTools } from "../toolchain.js";
 import { defineTool, type ToolContext, type ToolResult, truncate } from "../tool.js";
 import { OUTSIDE } from "./files.js";
@@ -42,8 +43,9 @@ export const grep = defineTool({
     const target = input.path ? path.relative(ctx.cwd, (await resolveForRead(ctx.cwd, input.path)).path) || "." : ".";
     // ripgrep when installed (much faster, respects .gitignore), else grep.
     const { rg } = fastTools();
-    let result = rg ? await runSearch(rg, ripgrepArgs(input, target), ctx.cwd, ctx.signal) : undefined;
-    if (!result || result.missing) result = await runSearch("grep", grepArgs(input, target), ctx.cwd, ctx.signal);
+    const sandbox = ctx.sandbox ?? Sandbox.none();
+    let result = rg ? await runSearch(sandbox.programSpec(rg, ripgrepArgs(input, target), ctx.cwd), ctx.cwd, ctx.signal) : undefined;
+    if (!result || result.missing) result = await runSearch(sandbox.programSpec("grep", grepArgs(input, target), ctx.cwd), ctx.cwd, ctx.signal);
 
     if (result.missing) return { content: "Neither rg nor grep is installed.", isError: true };
     // Both tools exit 1 for "no matches" and 2 for real errors.
@@ -77,7 +79,13 @@ export const glob = defineTool({
     const matches: { file: string; mtime: number }[] = [];
 
     const { rg } = fastTools();
-    const files = rg ? ripgrepFiles(rg, base, ctx.signal) : walk(base, ctx.signal);
+    const sandbox = ctx.sandbox ?? Sandbox.none();
+    // Listed inside the sandbox when it's active, so hidden folders stay hidden.
+    const files = rg
+      ? listFiles(sandbox.programSpec(rg, ripgrepListArgs(), ctx.cwd, { chdir: base }), base, ctx.signal)
+      : sandbox.active
+        ? listFiles(sandbox.programSpec("find", findArgs(), ctx.cwd, { chdir: base }), base, ctx.signal)
+        : walk(base, ctx.signal);
     for await (const { rel, abs } of files) {
       if (!regex.test(rel)) continue;
       const stat = await fs.stat(abs).catch(() => null);
@@ -122,14 +130,25 @@ async function* walk(base: string, signal: AbortSignal): AsyncGenerator<{ rel: s
 const MAX_LISTING_CHARS = 32_000_000;
 
 /**
- * Lists files under `base` with `rg --files`: much faster than walking the
- * tree in JavaScript on big repositories, and it skips what .gitignore
- * ignores. Hidden files are included, as in the built-in walker.
+ * `rg --files`: much faster than walking the tree in JavaScript on big
+ * repositories, and it skips what .gitignore ignores. Hidden files are
+ * included, as in the built-in walker.
  */
-async function* ripgrepFiles(rg: string, base: string, signal: AbortSignal): AsyncGenerator<{ rel: string; abs: string }> {
+function ripgrepListArgs(): string[] {
   const args = ["--files", "--hidden", "--color", "never"];
   for (const dir of SKIP_DIRS) args.push("--glob", `!${dir}`);
-  const child = spawn(rg, args, { cwd: base, signal, stdio: ["ignore", "pipe", "ignore"] });
+  return args;
+}
+
+/** `find` listing what the built-in walker would: everything but directories, skipping SKIP_DIRS. */
+function findArgs(): string[] {
+  const skip = [...SKIP_DIRS].flatMap((dir, i) => (i ? ["-o", "-name", dir] : ["-name", dir]));
+  return [".", "-mindepth", "1", "(", "-type", "d", "(", ...skip, ")", "-prune", ")", "-o", "(", "!", "-type", "d", "-print", ")"];
+}
+
+/** Runs a file lister in `base` and yields the paths it prints, one per line (relative, maybe "./"-prefixed). */
+async function* listFiles(spec: SpawnSpec, base: string, signal: AbortSignal): AsyncGenerator<{ rel: string; abs: string }> {
+  const child = spawn(spec.file, spec.args, { cwd: base, env: spec.env, signal, stdio: ["ignore", "pipe", "ignore"] });
   child.on("error", () => {}); // Aborted or missing; the stream simply ends.
   let pending = "";
   let read = 0;
@@ -138,13 +157,18 @@ async function* ripgrepFiles(rg: string, base: string, signal: AbortSignal): Asy
       read += chunk.length;
       const lines = (pending + chunk.toString("utf8")).split("\n");
       pending = lines.pop() ?? "";
-      for (const rel of lines) if (rel) yield { rel, abs: path.join(base, rel) };
+      for (const line of lines) if (line) yield entry(base, line);
       if (read > MAX_LISTING_CHARS) break;
     }
-    if (pending) yield { rel: pending, abs: path.join(base, pending) };
+    if (pending) yield entry(base, pending);
   } finally {
     child.kill();
   }
+}
+
+function entry(base: string, line: string): { rel: string; abs: string } {
+  const rel = line.startsWith("./") ? line.slice(2) : line;
+  return { rel, abs: path.join(base, rel) };
 }
 
 function ripgrepArgs(input: GrepInput, target: string): string[] {
@@ -175,9 +199,9 @@ interface SearchResult {
 }
 
 /** Runs a search binary without a shell, so the pattern is never shell-interpreted. */
-function runSearch(cmd: string, args: string[], cwd: string, signal: AbortSignal): Promise<SearchResult> {
+function runSearch(spec: SpawnSpec, cwd: string, signal: AbortSignal): Promise<SearchResult> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd, signal, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(spec.file, spec.args, { cwd, env: spec.env, signal, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     const collect = (chunk: Buffer) => {
       if (output.length < MAX_OUTPUT_CHARS * 4) output += chunk.toString("utf8");
@@ -187,6 +211,7 @@ function runSearch(cmd: string, args: string[], cwd: string, signal: AbortSignal
     child.on("error", (err: NodeJS.ErrnoException) =>
       resolve({ output: err.message, code: null, missing: err.code === "ENOENT" }),
     );
-    child.on("close", (code) => resolve({ output, code, missing: false }));
+    // Inside the sandbox, a missing program is bwrap failing to run it.
+    child.on("close", (code) => resolve({ output, code, missing: spec.file === "bwrap" && code === 1 && /^bwrap: execvp /m.test(output) }));
   });
 }

@@ -363,19 +363,24 @@ submodule; that asks first. `write_file`, `edit_file` and `bash` always ask, wit
 always allow that tool for the rest of the session. Writing is confined to the project, and
 never into `.git`.
 
-Some places are off limits to the file tools even with approval, the same ones the sandbox hides
-from commands: credentials and shell history in your home folder, `/tmp`, `/run`, `/mnt`, the
-agent's own config and sessions, and also `/proc`, `/sys` and `/dev` (the file tools run in the
-agent's own process, and `/proc` would expose its API keys). Symlinks are resolved before the
-check, so a link in the project can't lead there.
+The file tools read and write inside the same sandbox as `bash` (below), so they can reach
+exactly what commands can, and `grep` and `glob` run their searches and listings in it too.
+Before that, the agent checks the path itself, to give clear errors: some places are off limits
+even with approval, the same ones the sandbox hides from commands (credentials and shell history
+in your home folder, `/tmp`, `/run`, `/mnt`, the agent's own config and sessions), and also
+`/proc`, `/sys` and `/dev`. Symlinks are resolved before the check, so a link in the project
+can't lead there. With `--sandbox off`, only these checks apply.
 
 ### Shell sandbox
 
-`bash` commands run inside [bubblewrap](https://github.com/containers/bubblewrap), and the
-sandbox is required: if bubblewrap isn't installed or can't run, the agent doesn't start.
-Inside the sandbox:
+`bash` commands, and the file tools' reads and writes, run inside
+[bubblewrap](https://github.com/containers/bubblewrap), and the sandbox is required: if
+bubblewrap isn't installed or can't run, the agent doesn't start. Commands time out after 5
+minutes unless the model asks for longer (up to 10). Inside the sandbox:
 
-- the filesystem is read-only except the project directory and a private, empty `/tmp`
+- the filesystem is read-only except the project directory and a private `/tmp` and
+  `/var/tmp`: empty at first, kept between commands for as long as the agent runs (so a build
+  can leave files there for the next command), and deleted when it exits
 - credentials and shell history in your home directory (`~/.ssh`, `~/.aws`, `~/.docker`,
   `~/.netrc`, ...) are hidden
 - `/run` is hidden, which removes the Docker, Podman and D-Bus sockets (and, on WSL, the

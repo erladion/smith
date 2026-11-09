@@ -8,6 +8,8 @@ import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { Sandbox } from "../src/core/sandbox.js";
 import { bash } from "../src/core/tools/bash.js";
+import { editFile, readFile, writeFile } from "../src/core/tools/files.js";
+import { glob, grep } from "../src/core/tools/search.js";
 import type { ToolDef } from "../src/core/tool.js";
 
 let available = true;
@@ -123,6 +125,47 @@ describe("bash in the sandbox", { skip: !available && "bwrap is not available" }
     } finally {
       server.close();
     }
+  });
+
+  test("/tmp is private, starts empty, and is kept between commands", async () => {
+    const sandbox = Sandbox.create("on", false);
+    const ctx = { cwd: project, signal: new AbortController().signal, sandbox };
+    const tool = bash as ToolDef;
+    const sh = (command: string) => tool.run(tool.schema.parse({ command }), ctx);
+    // Empty but for the test project, which lives under /tmp here and is mounted in.
+    const listing = (await sh(`ls -A /tmp /var/tmp | grep -v : | grep -vx ${path.basename(project)} | grep . ; echo end`)).content;
+    assert.equal(listing, "end", "starts empty");
+    await sh("echo kept > /tmp/a && echo also > /var/tmp/b");
+    assert.equal((await sh("cat /tmp/a /var/tmp/b")).content, "kept\nalso");
+    // Another sandbox (another agent) has its own.
+    assert.match((await run("cat /tmp/a 2>&1")).content, /No such file or directory/);
+  });
+
+  test("the file tools read and write through the sandbox", async () => {
+    const sandbox = Sandbox.create("on", false);
+    const ctx = { cwd: project, signal: new AbortController().signal, sandbox };
+    const call = (tool: ToolDef, input: unknown) => tool.run(tool.schema.parse(input), ctx);
+
+    const wrote = await call(writeFile, { path: "deep/er/new.txt", content: "fresh\n" });
+    assert.equal(wrote.isError, undefined, wrote.content);
+    assert.equal(fs.readFileSync(path.join(project, "deep/er/new.txt"), "utf8"), "fresh\n");
+    assert.match((await call(editFile, { path: "deep/er/new.txt", old_string: "fresh", new_string: "edited" })).content, /Replaced 1 occurrence/);
+    assert.match((await call(readFile, { path: "deep/er/new.txt" })).content, /^1\tedited$/);
+    await assert.rejects(call(readFile, { path: "missing.txt" }), { code: "ENOENT" });
+
+    // What the sandbox hides or protects stays so, whatever the path checks let through.
+    const netrc = await sandbox.readFile(path.join(home, ".netrc"), project).catch((err: Error) => err.message);
+    assert.doesNotMatch(netrc, /hunter2/);
+    await assert.rejects(sandbox.writeFile("/usr/agent-test/x.txt", "x", project), /only allows writes inside the project/);
+    await assert.rejects(sandbox.writeFile(path.join(project, ".git", "config"), "evil", project), /only allows writes inside the project/);
+    assert.equal(fs.readFileSync(path.join(project, ".git", "config"), "utf8"), "[core]\n");
+
+    // Listing and searching run in it too: hidden folders list as empty.
+    const listed = (await call(glob, { pattern: "**/*" })).content;
+    assert.match(listed, /hello\.txt/);
+    assert.doesNotMatch(listed, /id_ed25519/);
+    assert.match((await call(grep, { pattern: "edited" })).content, /deep\/er\/new\.txt:1:edited/);
+    assert.equal((await call(grep, { pattern: "PRIVATE KEY", path: ".ssh" })).content, "No matches.");
   });
 
   test("a timed-out command is killed with everything it started", async () => {

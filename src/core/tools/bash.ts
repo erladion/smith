@@ -3,7 +3,7 @@ import { z } from "zod";
 import { Sandbox } from "../sandbox.js";
 import { defineTool, truncate } from "../tool.js";
 
-const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_TIMEOUT_MS = 600_000;
 const MAX_OUTPUT_CHARS = 20_000;
 // Stop buffering far past what we would show, so a runaway command can't eat memory.
