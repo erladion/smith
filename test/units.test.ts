@@ -12,6 +12,7 @@ import type { Message } from "../src/core/history.js";
 import { defaultName, deleteSession, findSession, listSessions, secureSessions, Session, sessionsDir } from "../src/core/session.js";
 import { loadPreferences, savePreferences } from "../src/core/preferences.js";
 import { ThinkTagParser } from "../src/core/think.js";
+import { runLaterChanges, runLaterReason, snapshotRunLater } from "../src/core/runlater.js";
 import { truncateLog } from "../src/core/tool.js";
 import { buildSystemPrompt } from "../src/core/prompt.js";
 import { ToolLog, toolLogFile } from "../src/core/toollog.js";
@@ -321,6 +322,39 @@ describe("smith --delete", () => {
     } finally {
       process.env.XDG_DATA_HOME = saved;
       fs.rmSync(data, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("files that run outside the sandbox later", () => {
+  test("are recognised by name and place, anywhere in the project", () => {
+    for (const rel of [".envrc", "package.json", "web/package.json", ".vscode/tasks.json", ".husky/pre-commit", ".github/workflows/ci.yml",
+      "Makefile", "lib/foo.mk", "CMakeLists.txt", "pyproject.toml", "requirements-dev.txt", "gradle/wrapper/gradle-wrapper.properties",
+      "Dockerfile", "compose.yaml", ".devcontainer/devcontainer.json", ".pre-commit-config.yaml", ".gitmodules", ".npmrc"]) {
+      assert.ok(runLaterReason(rel), rel);
+    }
+    for (const rel of ["src/main.ts", "README.md", "package-lock.json", "docs/Makefile.md", "src/github/workflows.ts"]) assert.equal(runLaterReason(rel), undefined, rel);
+  });
+
+  test("snapshots tell what was created, changed or deleted", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "smith-snap-"));
+    try {
+      fs.writeFileSync(path.join(dir, "Makefile"), "a");
+      fs.writeFileSync(path.join(dir, "package.json"), "{}");
+      fs.writeFileSync(path.join(dir, "main.c"), "x");
+      const before = snapshotRunLater(dir);
+      assert.deepEqual([...before.keys()].sort(), ["Makefile", "package.json"]);
+      fs.writeFileSync(path.join(dir, "Makefile"), "b");
+      fs.rmSync(path.join(dir, "package.json"));
+      fs.mkdirSync(path.join(dir, ".vscode"));
+      fs.writeFileSync(path.join(dir, ".vscode", "tasks.json"), "{}");
+      fs.writeFileSync(path.join(dir, "main.c"), "y");
+      assert.deepEqual(
+        runLaterChanges(before, snapshotRunLater(dir)).map((c) => `${c.rel} ${c.kind}`),
+        [".vscode/tasks.json created", "Makefile changed", "package.json deleted"],
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

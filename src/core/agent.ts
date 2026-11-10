@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import type OpenAI from "openai";
 import { z } from "zod";
 import {
@@ -23,6 +24,7 @@ import { createTaskTool, type TaskInput } from "./tools/task.js";
 import { createTodoTool, formatTodos, type Todo, todosFromHistory, unfinished } from "./tools/todo.js";
 import type { ToolApproval, ToolRun } from "./toollog.js";
 import { Checkpoint, restore } from "./undo.js";
+import { hashText, runLaterChanges, runLaterReason, snapshotRunLater } from "./runlater.js";
 
 type AssistantMessage = OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam;
 
@@ -38,6 +40,11 @@ export interface ApprovalRequest {
   preview?: DiffLine[];
   /** Why a normally prompt-free tool asks this time (e.g. reading outside the project). */
   note?: string;
+  /**
+   * The call changes a file that runs outside the sandbox later. Asked even
+   * when the tool is always allowed.
+   */
+  warning?: string;
 }
 
 export interface UndoResult {
@@ -95,6 +102,12 @@ export interface AgentOptions {
   ask?: (question: Question) => Promise<Answer>;
   /** Gives the agent the todo_write tool for keeping a checklist (default true). */
   todos?: boolean;
+  /**
+   * Always ask before the file tools change a file that runs outside the
+   * sandbox later (package.json, .envrc, ...), and report other changes to
+   * such files after each turn (default true).
+   */
+  protectRunLater?: boolean;
   onEvent: (event: AgentEvent) => void;
   /** Called when each tool call is over, whatever the outcome, e.g. for the tool log. */
   onToolRun?: (run: ToolRun) => void;
@@ -146,6 +159,8 @@ export class Agent {
   private measured: { tokens: number; messages: number } | null = null;
   /** The checklist the model keeps with todo_write. */
   private todoList: Todo[] = [];
+  /** Run-later files the user approved this turn, with the content they approved: not reported again. */
+  private approvedRunLater = new Map<string, string>();
 
   constructor(private readonly opts: AgentOptions) {
     this.history = [{ role: "system", content: opts.systemPrompt }, ...repairHistory(opts.history ?? [])];
@@ -272,7 +287,31 @@ export class Agent {
     this.turns.push({ start: this.history.length, prompt: text, checkpoint: new Checkpoint() });
     if (this.turns.length > MAX_UNDO) this.turns.shift();
     this.append({ role: "user", content: text });
-    await this.interruptible(signal, () => this.loop(signal));
+    const before = this.protectRunLater ? safely(() => snapshotRunLater(this.opts.cwd)) : undefined;
+    this.approvedRunLater.clear();
+    try {
+      await this.interruptible(signal, () => this.loop(signal));
+    } finally {
+      if (before) this.reportRunLater(before);
+    }
+  }
+
+  private get protectRunLater(): boolean {
+    return this.opts.protectRunLater !== false;
+  }
+
+  /** Says which files that run outside the sandbox later changed this turn, other than ones the user approved. */
+  private reportRunLater(before: Map<string, string>): void {
+    const after = safely(() => snapshotRunLater(this.opts.cwd));
+    if (!after) return;
+    const changes = runLaterChanges(before, after).filter((c) => this.approvedRunLater.get(c.rel) !== after.get(c.rel));
+    if (changes.length === 0) return;
+    const list = changes.map((c) => `- ${c.rel} (${c.kind}): ${c.why}`).join("\n");
+    this.opts.onEvent({
+      type: "notice",
+      level: "warn",
+      text: `This turn changed files that run outside the sandbox later:\n${list}\nLook at the changes (git diff) before you do any of that.`,
+    });
   }
 
   /** Summarizes the conversation now, regardless of how full the context is. */
@@ -419,6 +458,7 @@ export class Agent {
       // Read-only tools only (which also rules out nested sub-agents), no checklist or questions.
       tools: this.opts.tools.filter((t) => t.subagents ?? t.readOnly),
       todos: false,
+      protectRunLater: false,
       systemPrompt: this.opts.subagentPrompt!,
       alwaysAllowed: this.alwaysAllowed,
       // Its tools are read-only, but reading outside the project still asks you.
@@ -667,9 +707,10 @@ export class Agent {
 
     const ctx = this.toolContext(tool, signal);
     const reason = tool.readOnly ? await tool.approvalReason?.(args, ctx).catch(() => undefined) : undefined;
-    const needsApproval = !tool.readOnly || Boolean(reason);
+    const warning = this.runLaterWarning(tool, args);
+    const needsApproval = !tool.readOnly || Boolean(reason) || Boolean(warning);
     approval = needsApproval ? "already allowed" : "not needed";
-    if (needsApproval && !this.alwaysAllowed.has(tool.name)) {
+    if (needsApproval && (!this.alwaysAllowed.has(tool.name) || warning)) {
       // Show the change in the prompt; a call that would fail anyway fails without asking.
       let preview: DiffLine[] | undefined;
       try {
@@ -686,6 +727,7 @@ export class Agent {
         input: args,
         preview,
         note: reason,
+        warning,
         sandbox: tool.sandboxed ? { active: sandbox.active, description: sandbox.describe(this.opts.cwd) } : undefined,
       });
       if (decision === "deny" || signal.aborted) {
@@ -722,9 +764,21 @@ export class Agent {
    * longer need asking: an earlier answer can have been "always allow".
    */
   private requestApproval(req: ApprovalRequest): Promise<ApprovalDecision> {
-    const decision = this.approvals.then(() => (this.alwaysAllowed.has(req.tool) ? "allow" : this.opts.approve(req)));
+    const decision = this.approvals.then(() => (this.alwaysAllowed.has(req.tool) && !req.warning ? "allow" : this.opts.approve(req)));
     this.approvals = decision.catch(() => {});
     return decision;
+  }
+
+  /** The warning for a call that would change files that run outside the sandbox later, if it would. */
+  private runLaterWarning(tool: ToolDef, args: unknown): string | undefined {
+    if (!this.protectRunLater || !tool.touches) return undefined;
+    const reasons = tool
+      .touches(args)
+      .map((p) => path.relative(this.opts.cwd, path.resolve(this.opts.cwd, p)).split(path.sep).join("/"))
+      .map((rel) => ({ rel, why: runLaterReason(rel) }))
+      .filter((r): r is { rel: string; why: string } => Boolean(r.why));
+    if (reasons.length === 0) return undefined;
+    return reasons.map((r) => `${r.rel} runs outside the sandbox later: ${r.why}. Check the change.`).join("\n");
   }
 
   private setTodos(todos: Todo[]): void {
@@ -749,7 +803,21 @@ export class Agent {
       signal,
       sandbox: this.opts.sandbox,
       beforeWrite: (file: string) => checkpoint?.beforeWrite(file) ?? Promise.resolve(),
-      afterWrite: (file: string, content: string) => checkpoint?.afterWrite(file, content),
+      afterWrite: (file: string, content: string) => {
+        checkpoint?.afterWrite(file, content);
+        // Approved with the warning: the end-of-turn report leaves it out, unless it changes again.
+        const rel = path.relative(this.opts.cwd, file).split(path.sep).join("/");
+        if (runLaterReason(rel)) this.approvedRunLater.set(rel, hashText(content));
+      },
     };
+  }
+}
+
+/** The result of `work`, or undefined if it throws. */
+function safely<T>(work: () => T): T | undefined {
+  try {
+    return work();
+  } catch {
+    return undefined;
   }
 }

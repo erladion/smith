@@ -75,6 +75,7 @@ export const writeFile = defineTool({
   schema: writeSchema,
   readOnly: false,
   summarize: ({ path: p, content }) => `${p} (${content.split("\n").length} lines)`,
+  touches: ({ path: p }) => [p],
   preview: async (input, ctx) => (await planWrite(input, ctx)).diff,
   async run(input, ctx) {
     const plan = await planWrite(input, ctx);
@@ -122,6 +123,7 @@ export const editFile = defineTool({
   schema: editSchema,
   readOnly: false,
   summarize: ({ path: p, replace_all }) => (replace_all ? `${p} (all occurrences)` : p),
+  touches: ({ path: p }) => [p],
   preview: async (input, ctx) => (await planEdit(input, ctx)).diff,
   async run(input, ctx) {
     let plan: Awaited<ReturnType<typeof planEdit>>;

@@ -75,6 +75,7 @@ const ConfigSchema = z.strictObject({
   theme: z.enum(["matrix", "plain"]).optional().describe("matrix: digital rain, katakana spinner and Agent Smith's lines (default); plain: none of it"),
   codeStream: z.boolean().optional().describe("With the matrix theme, a stream of glyphs at the end of the status line while idle (default true)"),
   sandbox: SandboxSchema.optional(),
+  protectRunLater: z.boolean().optional().describe("Always ask before changing files that run outside the sandbox later, and report other changes (default true)"),
   endpoints: z.record(z.string(), EndpointSchema).default({}),
 });
 
@@ -116,6 +117,8 @@ export interface Config {
   /** Whether the matrix theme shows the idle stream of glyphs in the status line. */
   codeStream: boolean;
   sandbox: SandboxConfig;
+  /** Whether changes to files that run outside the sandbox later always ask, and are reported. */
+  protectRunLater: boolean;
   /** Problems worth telling the user about that don't stop the agent. */
   warnings: string[];
 }
@@ -145,7 +148,7 @@ export function loadConfig(file = configPath()): Config {
     raw = fs.readFileSync(file, "utf8");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      return { file, endpoints: [], subagents: true, toolLog: true, theme: "matrix", codeStream: true, sandbox: sandboxConfig(undefined), warnings: [] };
+      return { file, endpoints: [], subagents: true, toolLog: true, theme: "matrix", codeStream: true, sandbox: sandboxConfig(undefined), protectRunLater: true, warnings: [] };
     }
     throw err;
   }
@@ -179,7 +182,7 @@ export function loadConfig(file = configPath()): Config {
     warnings.push(`${file} contains API keys but other users can read it. Run: chmod 600 ${file}`);
   }
 
-  return { file, endpoints, defaultEndpoint: config.default, maxSteps: config.maxSteps, subagents: config.subagents ?? true, toolLog: config.toolLog ?? true, theme: config.theme ?? "matrix", codeStream: config.codeStream ?? true, sandbox: sandboxConfig(config.sandbox), warnings };
+  return { file, endpoints, defaultEndpoint: config.default, maxSteps: config.maxSteps, subagents: config.subagents ?? true, toolLog: config.toolLog ?? true, theme: config.theme ?? "matrix", codeStream: config.codeStream ?? true, sandbox: sandboxConfig(config.sandbox), protectRunLater: config.protectRunLater ?? true, warnings };
 }
 
 function sandboxConfig(raw: z.output<typeof SandboxSchema> | undefined): SandboxConfig {

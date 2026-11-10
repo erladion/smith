@@ -20,6 +20,9 @@ export function approvalBox(req: ApprovalRequest, width: number, rows: number): 
   const summary = wrap([{ text: req.summary }], width - 4);
   content.push(...summary.slice(0, 12));
   if (req.note) content.push([{ text: req.note, style: { color: "yellow" } }]);
+  if (req.warning) {
+    for (const line of req.warning.split("\n")) content.push(...wrap([{ text: `⚠ ${line}`, style: { color: "red", bold: true } }], width - 4));
+  }
   if (summary.length > 12) content.push([{ text: `… ${summary.length - 12} more lines`, style: DIM }]);
   if (req.preview) {
     // Leave room for the rest of the screen, but show as much of the change as fits.

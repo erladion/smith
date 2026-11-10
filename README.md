@@ -128,6 +128,7 @@ the agent with a message saying what's wrong. `smith --endpoints` prints an exam
 | `theme` | `"matrix"` | `"plain"` turns off the [Matrix touches](#in-the-tui): rain, katakana spinner, Agent Smith's lines |
 | `codeStream` | `true` | with the matrix theme, `false` turns off only the idle stream of glyphs in the status line |
 | `sandbox` | bwrap | where commands and the file tools run; see [Sandbox settings](#sandbox-settings) |
+| `protectRunLater` | `true` | always ask before changing [files that run outside the sandbox later](#files-that-run-outside-the-sandbox-later), and report other changes to them |
 
 Next to it, in the same folder:
 
@@ -537,9 +538,30 @@ The first command waits while the image is pulled, if it isn't on the machine ye
 meant for places neither can work, such as inside a container that already isolates the agent.
 The banner, status line and every approval prompt say where commands run.
 
-What neither sandbox can protect: anything in the project itself (scripts in `package.json`, a
-`Makefile`, `.envrc`) can still be changed and will run unsandboxed if you run it yourself
-later, and with the network on, commands can reach services on localhost.
+### Files that run outside the sandbox later
+
+What no sandbox can stop: files in the project that run code later, outside it, without you
+deliberately running the project. Changing one is the way out of the sandbox, by mistake or
+because something the model read told it to. Smith watches for them:
+
+- **When you enter the folder:** `.envrc` (direnv).
+- **When you open it in an editor:** `.vscode/`, `.idea/`, `.nvim.lua`, `.dir-locals.el`.
+- **When you commit:** `.husky/`, `.githooks/`, `.pre-commit-config.yaml`, lefthook, lint-staged.
+- **In CI, when you push:** `.github/workflows/`, `.gitlab-ci.yml`, `Jenkinsfile` and the like.
+- **When you install dependencies or build:** `package.json`, `.npmrc`, `.yarnrc*`,
+  `setup.py`, `pyproject.toml`, `requirements*.txt`, `Makefile`, `CMakeLists.txt`, Gradle and
+  Maven files, `Cargo.toml`, `build.rs`.
+- **When you build or start containers:** `Dockerfile`, compose files, `.devcontainer/`.
+- **When git fetches submodules:** `.gitmodules`.
+
+`write_file` and `edit_file` always ask before changing one, even when you've chosen "always
+allow", with a red warning in the prompt saying when it would run. A shell command can change
+them too, which can't be known in advance, so after every turn Smith compares them with how they
+were before, and lists any that changed (other than the ones you just approved): look at those
+with `git diff` before you build, enter the folder or commit. `"protectRunLater": false` turns
+this off.
+
+With the network on, commands can also reach services on `localhost`.
 
 ## Scripts
 

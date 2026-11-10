@@ -186,6 +186,7 @@ async function main(): Promise<void> {
       systemPrompt: buildSystemPrompt(project.cwd, { instructions, skills, fastTools: fastTools(), canAsk: Boolean(hooks.ask), sandbox: sandbox.promptNotes(project.cwd) }),
       subagentPrompt: config.subagents ? buildSubagentPrompt(project.cwd, { instructions, skills }) : undefined,
       onHistory: (change) => session.record(change),
+      protectRunLater: config.protectRunLater,
       onToolRun: toolLog && ((run) => toolLog.write(run)),
       ...hooks,
     });
