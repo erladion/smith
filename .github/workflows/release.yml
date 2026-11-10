@@ -120,6 +120,9 @@ jobs:
           name: smith-${{ matrix.target }}
           path: release/*
           if-no-files-found: error
+          # Only the release job below needs them, minutes later; a release keeps
+          # its own copy. Kept longer, they fill the account's Actions storage.
+          retention-days: 1
 
   release:
     name: Publish the release

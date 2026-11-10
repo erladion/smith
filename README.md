@@ -102,9 +102,47 @@ Connections to the model server work like `curl` on the same machine:
 - **Errors say why.** "Could not reach" is followed by the actual cause (certificate, refused,
   DNS, timeout) and a hint.
 
-## Endpoints
+## Configuration
 
-Servers you use regularly go in `~/.config/smith/config.json`:
+Settings live in `~/.config/smith/config.json` (or `$XDG_CONFIG_HOME/smith/config.json`). The
+file is optional, only ever read, never written, so hand edits are safe; a mistake in it stops
+the agent with a message saying what's wrong. `smith --endpoints` prints an example.
+
+```json
+{
+  "default": "local",
+  "maxSteps": 100,
+  "endpoints": {
+    "local": { "baseURL": "http://localhost:8080/v1" }
+  }
+}
+```
+
+| Setting | Default | |
+|---|---|---|
+| `endpoints` | none | the servers you use; see [Endpoints](#endpoints) below |
+| `default` | | the endpoint to start on when none was used before |
+| `maxSteps` | `50` | model calls one message may use before the agent stops and asks you; sending "continue" gives it a fresh budget. Raise it for long tasks. One call can run several tools; sub-agents get the same limit, each counted separately. `--max-steps <n>` overrides it for one run |
+| `subagents` | `true` | `false` takes away the `task` tool, e.g. for a model that overuses it ([more](#how-the-agent-works-through-a-task)) |
+| `toolLog` | `true` | `false` turns off the [tool log](#tool-log) |
+| `theme` | `"matrix"` | `"plain"` turns off the [Matrix touches](#in-the-tui): rain, katakana spinner, Agent Smith's lines |
+| `codeStream` | `true` | with the matrix theme, `false` turns off only the idle stream of glyphs in the status line |
+
+Next to it, in the same folder:
+
+| File | |
+|---|---|
+| `preferences.json` | the endpoint, models and reasoning level you last picked; written by the agent |
+| `AGENTS.md` | your own instructions for every project ([more](#project-instructions-and-skills)) |
+| `skills/` | your own skills, one folder each with a `SKILL.md` |
+
+Command-line flags win over the file for one run (`smith --help` lists them all), and a few
+environment variables are read too: `SMITH_BASE_URL`, `SMITH_API_KEY` and `SMITH_MODEL` (see
+below), and `NO_COLOR` to turn off colors (and with them the rain).
+
+### Endpoints
+
+Servers you use regularly go under `endpoints`:
 
 ```json
 {
@@ -129,17 +167,11 @@ Servers you use regularly go in `~/.config/smith/config.json`:
 | `model` | model to use when you haven't picked one on this endpoint before |
 | `contextSize` | context window, for servers that don't report it (e.g. Ollama) |
 
-At the top level, next to `endpoints`, `"maxSteps": 120` sets how many model calls one message
-may use before the agent stops and asks you (default 50; `--max-steps` overrides it for one run).
-Raise it for long autonomous tasks; when it stops, sending "continue" gives it a fresh budget.
-`"toolLog": false` turns off the [tool log](#tool-log), and `"theme": "plain"` turns off the
-[Matrix touches](#in-the-tui) (`"codeStream": false` only the idle stream in the status line).
-
 `--endpoints` lists them, `-e <name>` starts on one, and `/endpoint` switches mid-conversation.
 Without `-e`, the agent starts on the resumed session's endpoint, else the one used last, else
 `default`. `--base-url` (or `SMITH_BASE_URL`) bypasses the config for a one-off server, and only
 then are `SMITH_API_KEY`/`OPENAI_API_KEY` used: keys from your environment are never sent to a
-configured endpoint they weren't set for. The file is only read, never written.
+configured endpoint they weren't set for.
 
 ## In the TUI
 
