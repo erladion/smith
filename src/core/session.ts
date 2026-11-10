@@ -224,6 +224,26 @@ export function findSession(idOrName: string): string {
   throw new Error(`No session with the id or name "${idOrName}". smith --sessions lists them.`);
 }
 
+/**
+ * Deletes a session: its log, and its tool log. Returns the files removed.
+ * The caller makes sure it isn't the session being recorded.
+ */
+export function deleteSession(id: string): string[] {
+  if (!/^[\w.-]+$/.test(id)) throw new Error(`Not a session id: ${id}`);
+  const files = [path.join(sessionsDir(), `${id}.jsonl`), path.join(path.dirname(sessionsDir()), "logs", `${id}.jsonl`)];
+  if (!fs.existsSync(files[0]!)) throw new Error(`No session ${id}.`);
+  const removed: string[] = [];
+  for (const file of files) {
+    try {
+      fs.unlinkSync(file);
+      removed.push(file);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
+  return removed;
+}
+
 /** One line from a session's first message; after compaction, the message following the summary. */
 function preview(first: string): string {
   let text = first;

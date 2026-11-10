@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import readline from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { Agent } from "./core/agent.js";
 import { type Config, EXAMPLE_CONFIG, loadConfig } from "./core/config.js";
@@ -13,7 +14,7 @@ import { buildSubagentPrompt, buildSystemPrompt } from "./core/prompt.js";
 import { isReasoningLevel, REASONING_LEVELS, type ReasoningLevel } from "./core/reasoning.js";
 import { Sandbox, type SandboxType } from "./core/sandbox.js";
 import { Server } from "./core/server.js";
-import { findSession, listSessions, secureSessions, Session } from "./core/session.js";
+import { deleteSession, findSession, listSessions, secureSessions, Session } from "./core/session.js";
 import { loadSkills, type Skill, skillRoots } from "./core/skills.js";
 import type { ToolDef } from "./core/tool.js";
 import { fastTools } from "./core/toolchain.js";
@@ -58,10 +59,11 @@ Sessions:
   -c, --continue         Resume the most recent session in this directory
   -r, --resume <id|name> Resume a session by id or name (in the folder it was in)
   --sessions             List saved sessions from every folder (smith <folder> --sessions: only that one)
+  --delete <id|name>     Delete a session and its tool log (asks first; --yes doesn't)
 
 One-shot:
   -p, --print <prompt>   Run one prompt without the TUI and print the answer
-  -y, --yes              With --print, allow every tool call without asking
+  -y, --yes              With --print, allow every tool call without asking; with --delete, don't ask
 
   -v, --version          Show the version
   -h, --help             Show this help
@@ -89,6 +91,7 @@ async function main(): Promise<void> {
       continue: { type: "boolean", short: "c" },
       resume: { type: "string", short: "r" },
       sessions: { type: "boolean" },
+      delete: { type: "string" },
       print: { type: "string", short: "p" },
       yes: { type: "boolean", short: "y" },
       help: { type: "boolean", short: "h" },
@@ -108,6 +111,10 @@ async function main(): Promise<void> {
   if (positionals[0]) process.chdir(resolveFolder(positionals[0], process.cwd()));
   if (values.sessions) {
     printSessions(positionals[0] ? process.cwd() : undefined);
+    return;
+  }
+  if (values.delete !== undefined) {
+    await deleteFromCommandLine(values.delete, values.yes ?? false);
     return;
   }
   // Resume first: a resumed session suggests which model to use, and where to work.
@@ -223,6 +230,10 @@ async function main(): Promise<void> {
         return { messages: opened.messages, model: session.model, endpoint: session.endpoint, cwd: session.cwd, lastUsed: session.lastUsed };
       },
       rename: (name) => session.rename(name),
+      remove: (id) => {
+        if (id === session.id) throw new Error("That's the current session.");
+        deleteSession(id);
+      },
       startNew: (model, endpoint) => {
         session = Session.create(project.cwd, model, endpoint);
       },
@@ -395,6 +406,27 @@ function printSessions(cwd: string | undefined): void {
 
 /** Commands the agent runs in the background; they're stopped when Smith exits. */
 const jobs = new BackgroundJobs();
+
+/** smith --delete: shows the session, asks (unless --yes), and deletes it with its tool log. */
+async function deleteFromCommandLine(idOrName: string, yes: boolean): Promise<void> {
+  const id = findSession(idOrName);
+  const info = listSessions().find((s) => s.id === id);
+  const what = info
+    ? `"${info.name}" (${id}) in ${shortPath(info.cwd, 60)}: ${info.turns} message${info.turns === 1 ? "" : "s"}, last used ${info.updated.toLocaleString()}`
+    : id;
+  if (!yes) {
+    if (!process.stdin.isTTY) throw new Error(`Not deleting ${what} without asking; pass --yes to delete it anyway.`);
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await rl.question(`Delete ${what}, and its tool log? [y/N] `);
+    rl.close();
+    if (!/^y(es)?$/i.test(answer.trim())) {
+      console.log("Nothing deleted.");
+      return;
+    }
+  }
+  deleteSession(id);
+  console.log(`Deleted ${what}.`);
+}
 
 async function runHeadless(
   createAgent: (hooks: AgentHooks) => Agent,

@@ -374,12 +374,14 @@ smith --sessions                 # every session from every folder: name, folder
 smith ~/git/webapp --sessions    # only that folder's
 smith --resume login-fix         # by name or id, from anywhere: it goes back to the session's folder
 smith -c                         # the latest session in the current folder
+smith --delete login-fix         # delete a session and its tool log (asks first; --yes doesn't)
 ```
 
 In the TUI, `/sessions` switches between this folder's sessions, `/sessions all` between every
 folder's (moving to that folder), and `/new` starts a fresh one. Resuming or switching replays
 the transcript and continues on the endpoint and model the session last used, when they're still
-available.
+available. In that list, `ctrl+d` deletes the highlighted session and its tool log, after a y/n;
+the session you're in can't be deleted.
 
 ## Tool log
 

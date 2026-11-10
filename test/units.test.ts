@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +9,7 @@ import { chooseTail, SUMMARY_PREFIX, trimOldToolResults } from "../src/core/cont
 import { configDir, dataDir, moveOldFolders } from "../src/core/dirs.js";
 import { describeError } from "../src/core/errors.js";
 import type { Message } from "../src/core/history.js";
-import { defaultName, findSession, listSessions, secureSessions, Session, sessionsDir } from "../src/core/session.js";
+import { defaultName, deleteSession, findSession, listSessions, secureSessions, Session, sessionsDir } from "../src/core/session.js";
 import { loadPreferences, savePreferences } from "../src/core/preferences.js";
 import { ThinkTagParser } from "../src/core/think.js";
 import { truncateLog } from "../src/core/tool.js";
@@ -95,6 +96,17 @@ describe("sessions", () => {
     fs.chmodSync(session.file, 0o644);
     Session.open(session.id).session.record({ type: "append", message: { role: "assistant", content: "ok" } });
     assert.equal(mode(session.file), "600");
+  });
+
+  test("deleting a session removes its log and its tool log", () => {
+    const session = Session.create("/del", "m");
+    session.record({ type: "append", message: { role: "user", content: "throwaway" } });
+    new ToolLog(() => session.id, () => "/del").write({ time: new Date().toISOString(), tool: "bash", input: {}, status: "ok", durationMs: 1, output: "" });
+    assert.ok(fs.existsSync(toolLogFile(session.id)));
+    assert.deepEqual(deleteSession(session.id), [session.file, toolLogFile(session.id)]);
+    assert.ok(!fs.existsSync(session.file) && !fs.existsSync(toolLogFile(session.id)));
+    assert.throws(() => deleteSession(session.id), /No session/);
+    assert.throws(() => deleteSession("../config"), /Not a session id/);
   });
 
   test("the tool log appends one private JSON line per call to the session's log", () => {
@@ -280,5 +292,35 @@ describe("long command output", () => {
     assert.match(prompt, /Where commands run:\n- Commands run in a test sandbox\./);
     assert.match(prompt, /find out how this project does it/);
     assert.match(prompt, /larger timeout_ms/);
+  });
+});
+
+describe("smith --delete", () => {
+  const cli = path.join(process.cwd(), "src", "cli.ts");
+  const runCli = (args: string[], data: string) =>
+    spawnSync(process.execPath, ["--import", "tsx", cli, ...args], { encoding: "utf8", input: "", env: { ...process.env, XDG_DATA_HOME: data, XDG_CONFIG_HOME: path.join(data, "config") } });
+
+  test("asks first (and refuses without a terminal); --yes deletes by name", () => {
+    const data = fs.mkdtempSync(path.join(os.tmpdir(), "smith-delete-"));
+    const saved = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = data;
+    try {
+      const session = Session.create("/del", "m");
+      session.record({ type: "append", message: { role: "user", content: "fix the login" } });
+      session.rename("login-fix");
+
+      const refused = runCli(["--delete", "login-fix"], data);
+      assert.notEqual(refused.status, 0);
+      assert.match(refused.stderr, /Not deleting "login-fix" .* without asking; pass --yes/);
+      assert.ok(fs.existsSync(session.file));
+
+      const done = runCli(["--delete", "login-fix", "--yes"], data);
+      assert.equal(done.status, 0, done.stderr);
+      assert.match(done.stdout, /Deleted "login-fix" \(.+\) in \/del: 1 message/);
+      assert.ok(!fs.existsSync(session.file));
+    } finally {
+      process.env.XDG_DATA_HOME = saved;
+      fs.rmSync(data, { recursive: true, force: true });
+    }
   });
 });

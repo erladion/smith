@@ -37,6 +37,8 @@ export interface SessionControl {
   open(id: string): { messages: Message[]; model: string; endpoint?: string; cwd: string; lastUsed?: Date };
   /** Names the current session. */
   rename(name: string): void;
+  /** Deletes a session that isn't the current one, with its tool log. */
+  remove(id: string): void;
   /** Starts recording to a new session (its file appears with the first message). */
   startNew(model: string, endpoint: string | undefined): void;
   /** Folders with saved sessions, most recently used first. */
@@ -108,7 +110,7 @@ export interface UiContext {
   /** Clears the screen and starts a fresh transcript: a new session, or a resumed one last used at `lastUsed`. */
   startOver(start: { resumed: false } | { resumed: true; lastUsed?: Date }, entries: Entry[]): void;
   /** Shows a picker; `onPick` gets the value of the item chosen (not called on esc). */
-  openPicker(picker: Picker, onPick: (value: string) => void): void;
+  openPicker(picker: Picker, onPick: (value: string) => void, onAction?: (value: string) => void): void;
   /** Shows a spinner while `work` runs, printing any error. */
   withActivity(activity: string, work: () => Promise<void>): Promise<void>;
   /** Fetches the server's model list again, for completing /model. */

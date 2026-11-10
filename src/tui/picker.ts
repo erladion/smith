@@ -13,6 +13,10 @@ const WINDOW = 10;
 export class Picker {
   private filter = "";
   private index: number;
+  /** The item waiting for y/n on the action, and the question. */
+  private confirming: { item: PickerItem; question: string } | null = null;
+  /** Why the action couldn't be done, shown until the next key. */
+  private refusal: string | null = null;
 
   constructor(
     readonly title: string,
@@ -23,6 +27,11 @@ export class Picker {
       back?: string;
       /** Replaces the default key help line. */
       help?: string;
+      /**
+       * A second thing to do with an item, on ctrl+<key> (e.g. delete it).
+       * `check` returns the question to confirm with y/n, or why it can't be done.
+       */
+      action?: { key: string; hint: string; check: (item: PickerItem) => { ask: string } | { refuse: string } };
     } = {},
   ) {
     this.index = Math.max(0, items.findIndex((i) => i.value === current));
@@ -37,10 +46,28 @@ export class Picker {
     return Math.min(this.index, Math.max(0, this.visible().length - 1));
   }
 
-  /** Applies a key: returns the chosen value, "cancel", or undefined to keep going. */
-  handle(key: Key): { value: string } | "cancel" | undefined {
+  /**
+   * Applies a key: returns the chosen value (with `action` when it was the
+   * action, confirmed), "cancel", or undefined to keep going.
+   */
+  handle(key: Key): { value: string; action?: boolean } | "cancel" | undefined {
     const visible = this.visible();
     const at = this.selected();
+    this.refusal = null;
+    if (this.confirming) {
+      const { item } = this.confirming;
+      this.confirming = null;
+      return key.name === "text" && key.text?.toLowerCase() === "y" ? { value: item.value, action: true } : undefined;
+    }
+    const action = this.options.action;
+    if (action && key.name === "char" && key.ctrl && key.text === action.key) {
+      const item = visible[at];
+      if (!item) return undefined;
+      const check = action.check(item);
+      if ("ask" in check) this.confirming = { item, question: check.ask };
+      else this.refusal = check.refuse;
+      return undefined;
+    }
     if (key.name === "escape") return "cancel";
     if (key.name === "return") {
       const item = visible[at];
@@ -66,10 +93,14 @@ export class Picker {
     const start = Math.min(Math.max(0, at - Math.floor(WINDOW / 2)), Math.max(0, visible.length - WINDOW));
     const shown = visible.slice(start, start + WINDOW);
 
-    const out: Line[] = [
-      [{ text: this.title, style: { bold: true } }],
-      [{ text: this.filter ? `filter: ${this.filter}` : (this.options.help ?? "type to filter · ↑↓ move · enter select · esc cancel"), style: { dim: true } }],
-    ];
+    const action = this.options.action;
+    const help = this.options.help ?? `type to filter · ↑↓ move · enter select${action ? ` · ctrl+${action.key} ${action.hint}` : ""} · esc cancel`;
+    const second: Line = this.confirming
+      ? [{ text: `${this.confirming.question} `, style: { color: "yellow", bold: true } }, { text: "y", style: { color: "green" } }, { text: "/n", style: { dim: true } }]
+      : this.refusal
+        ? [{ text: this.refusal, style: { color: "yellow" } }]
+        : [{ text: this.filter ? `filter: ${this.filter}` : help, style: { dim: true } }];
+    const out: Line[] = [[{ text: this.title, style: { bold: true } }], second];
     if (start > 0) out.push([{ text: `  ↑ ${start} more`, style: { dim: true } }]);
     shown.forEach((item, i) => {
       const selected = start + i === at;

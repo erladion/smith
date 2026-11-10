@@ -196,6 +196,25 @@ test("picker: backspace with nothing typed goes back", () => {
   assert.deepEqual(picker.handle({ name: "backspace" }), { value: "up" });
 });
 
+test("picker: an action key asks y/n first, and can refuse", () => {
+  const picker = new Picker("Sessions", [{ value: "cur", label: "current one" }, { value: "old", label: "old one" }], "cur", {
+    action: { key: "d", hint: "delete", check: (item) => (item.value === "cur" ? { refuse: "Not this one." } : { ask: `Delete ${item.label}?` }) },
+  });
+  const text = () => picker.lines().map((l) => l.map((s) => s.text).join(""));
+  assert.match(text()[1]!, /ctrl\+d delete/);
+  const ctrlD = { name: "char", ctrl: true, text: "d" } as const;
+
+  assert.equal(picker.handle(ctrlD), undefined);
+  assert.equal(text()[1], "Not this one.", "refused for the current item");
+  picker.handle({ name: "down" });
+  picker.handle(ctrlD);
+  assert.equal(text()[1], "Delete old one? y/n");
+  assert.equal(picker.handle({ name: "text", text: "n" }), undefined, "n backs out");
+  assert.match(text()[1]!, /type to filter/);
+  picker.handle(ctrlD);
+  assert.deepEqual(picker.handle({ name: "text", text: "y" }), { value: "old", action: true });
+});
+
 test("folder listing: sorted, hidden and files left out, symlinked folders kept", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-folders-"));
   try {

@@ -129,6 +129,7 @@ export class SessionCommands {
       return app.print({ kind: "notice", level: "info", text: `There are no other saved sessions${where}.` });
     }
     const folders = new Map(sessions.map((s) => [s.id, s.cwd]));
+    const byId = new Map(sessions.map((s) => [s.id, s]));
     const items = sessions.map((s) => ({
       value: s.id,
       label: s.name,
@@ -142,9 +143,33 @@ export class SessionCommands {
         .join(" · "),
     }));
     const title = everywhere ? "Switch session (all folders)" : "Switch session (this folder; /sessions all for every folder)";
-    app.openPicker(new Picker(title, items, current), (id) => {
-      if (id !== this.sessions.currentId()) void this.switchSession(id, folders.get(id));
-    });
+    const action = {
+      key: "d",
+      hint: "delete",
+      check: (item: { value: string; label: string }) => {
+        if (item.value === this.sessions.currentId()) return { refuse: "That's the session you're in; switch to another one first." };
+        const turns = byId.get(item.value)?.turns ?? 0;
+        return { ask: `Delete "${item.label}" (${turns} message${turns === 1 ? "" : "s"}) and its tool log?` };
+      },
+    };
+    app.openPicker(
+      new Picker(title, items, current, { action }),
+      (id) => {
+        if (id !== this.sessions.currentId()) void this.switchSession(id, folders.get(id));
+      },
+      (id) => this.deleteSession(id, everywhere, byId.get(id)?.name ?? id),
+    );
+  }
+
+  /** Deletes a session from the picker, then shows the picker again. */
+  private deleteSession(id: string, everywhere: boolean, name: string): void {
+    try {
+      this.sessions.remove(id);
+    } catch (err) {
+      return this.app.print({ kind: "notice", level: "error", text: `Could not delete the session: ${(err as Error).message}` });
+    }
+    this.app.print({ kind: "notice", level: "info", text: `Deleted the session "${name}" (${id}) and its tool log.` });
+    this.openSessionPicker(everywhere);
   }
 
   /** Opens a session; one from another folder moves there, to work where it was recorded. */

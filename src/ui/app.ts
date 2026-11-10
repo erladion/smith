@@ -60,7 +60,7 @@ export class TuiApp implements UiContext {
   private live: { kind: BlockKind; text: string } | null = null;
   private activity: string | null = null;
   private approval: (ApprovalRequest & { resolve: (d: ApprovalDecision) => void }) | null = null;
-  private picker: { picker: Picker; onPick: (value: string) => void } | null = null;
+  private picker: { picker: Picker; onPick: (value: string) => void; onAction?: (value: string) => void } | null = null;
   /** The agent's question (ask_user), with the suggested answer highlighted. */
   private question: (Question & { selected: number; resolve: (a: Answer) => void }) | null = null;
   private busy = false;
@@ -158,8 +158,8 @@ export class TuiApp implements UiContext {
     for (const entry of entries) this.print(entry);
   }
 
-  openPicker(picker: Picker, onPick: (value: string) => void): void {
-    this.picker = { picker, onPick };
+  openPicker(picker: Picker, onPick: (value: string) => void, onAction?: (value: string) => void): void {
+    this.picker = { picker, onPick, onAction };
     this.requestRender();
   }
 
@@ -526,7 +526,8 @@ export class TuiApp implements UiContext {
       else if (result) {
         // Cleared first: choosing can open the next picker (the folder browser).
         this.picker = null;
-        open.onPick(result.value);
+        if (result.action) open.onAction?.(result.value);
+        else open.onPick(result.value);
       }
       return;
     }
