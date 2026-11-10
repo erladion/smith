@@ -127,6 +127,7 @@ the agent with a message saying what's wrong. `smith --endpoints` prints an exam
 | `toolLog` | `true` | `false` turns off the [tool log](#tool-log) |
 | `theme` | `"matrix"` | `"plain"` turns off the [Matrix touches](#in-the-tui): rain, katakana spinner, Agent Smith's lines |
 | `codeStream` | `true` | with the matrix theme, `false` turns off only the idle stream of glyphs in the status line |
+| `sandbox` | bwrap | where commands and the file tools run; see [Sandbox settings](#sandbox-settings) |
 
 Next to it, in the same folder:
 
@@ -172,6 +173,40 @@ Without `-e`, the agent starts on the resumed session's endpoint, else the one u
 `default`. `--base-url` (or `SMITH_BASE_URL`) bypasses the config for a one-off server, and only
 then are `SMITH_API_KEY`/`OPENAI_API_KEY` used: keys from your environment are never sent to a
 configured endpoint they weren't set for.
+
+### Sandbox settings
+
+```json
+{
+  "sandbox": {
+    "type": "container",
+    "network": false,
+    "limits": { "memory": "8g", "processes": 4096, "cpus": 4 },
+    "home": { "show": ["~/.local/lib"], "writable": ["~/.m2/repository"] },
+    "container": {
+      "runtime": "podman",
+      "image": "registry.access.redhat.com/ubi9/ubi:latest",
+      "mounts": ["~/.m2/repository", "~/.gitconfig:ro"]
+    },
+    "projects": {
+      "~/git/webapp": { "image": "localhost/node22-dev:latest" },
+      "~/git/backend": { "image": "localhost/java21-dev:latest", "mounts": ["~/.gradle"] }
+    }
+  }
+}
+```
+
+| Setting | Default | |
+|---|---|---|
+| `type` | `"bwrap"` | `"bwrap"` or `"container"` ([which to pick](#shell-sandbox)); `--sandbox bwrap\|container\|off` overrides it for one run, and off can't be set here |
+| `network` | `false` | whether commands can use the network from the start; `--network` and `/network` change it |
+| `limits` | none | caps for each command: `memory` (`"8g"`, `"512m"`; swap counts too), `processes`, `cpus`. With bwrap they need `systemd-run --user`, which RHEL has; without it only `processes` applies, and you're told |
+| `home.show` | `[]` | bwrap: home folders shown read-only |
+| `home.writable` | `[]` | bwrap: home folders shared read-write (created if missing), e.g. build caches to keep |
+| `container.runtime` | `"podman"` | or `"docker"` |
+| `container.image` | `ubi9/ubi` | the image when no `projects` entry matches |
+| `container.mounts` | `[]` | `"path"`, `"path:ro"`, `"path:/inside"` or `"path:/inside:ro"`; the same path inside when not given |
+| `projects` | `{}` | per folder: its own `image` and extra `mounts`; the most specific folder containing the project wins |
 
 ## In the TUI
 
@@ -405,7 +440,9 @@ Before that, the agent checks the path itself, to give clear errors: some places
 even with approval, the same ones the sandbox hides from commands (credentials and shell history
 in your home folder, `/tmp`, `/run`, `/mnt`, the agent's own config and sessions), and also
 `/proc`, `/sys` and `/dev`. Symlinks are resolved before the check, so a link in the project
-can't lead there. With `--sandbox off`, only these checks apply.
+can't lead there. With `--sandbox off`, only these checks apply. Since the reads happen in the
+sandbox, a read outside the project finds only what the sandbox shows: with bwrap, most of your
+home folder isn't there; in a container, it's the container's own files.
 
 With the sandbox, `/tmp` and `/var/tmp` are the session's private ones (below), so `read_file`,
 `grep` and `glob` read them without asking: a build log a command left there is one read away. A
@@ -413,16 +450,25 @@ symlink in there that leads elsewhere counts as a read outside the project, and 
 
 ### Shell sandbox
 
-`bash` commands, and the file tools' reads and writes, run inside
-[bubblewrap](https://github.com/containers/bubblewrap), and the sandbox is required: if
-bubblewrap isn't installed or can't run, the agent doesn't start. Commands time out after 5
-minutes unless the model asks for longer (up to 10). Inside the sandbox:
+`bash` commands, and the file tools' reads and writes, run in a sandbox, and it's required: if
+it can't run, the agent doesn't start. There are two kinds: bubblewrap (the default, below) and
+[containers](#container-sandbox). Commands time out after 5 minutes unless the model asks for
+longer (up to 10).
+
+With [bubblewrap](https://github.com/containers/bubblewrap):
 
 - the filesystem is read-only except the project directory and a private `/tmp` and
   `/var/tmp`: empty at first, kept between commands for as long as the agent runs (so a build
   can leave files there for the next command), and deleted when it exits
+- your home folder is replaced by a private, empty one, kept the same way: builds can write
+  caches to `~/.cache` and the like, but other projects, tokens and dotfiles aren't there.
+  Shown read-only on top of it: the project, the repository it's in (for a submodule or
+  subfolder), skill folders, and the folders on your `PATH` inside home, so your own tools keep
+  working (for a `bin` folder its parent, e.g. `~/.cargo`, except `~/bin` and `~/.local/bin`).
+  `sandbox.home.show` adds more, and `sandbox.home.writable` shares folders read-write, for
+  caches you want to keep, like `~/.m2/repository`
 - credentials and shell history in your home directory (`~/.ssh`, `~/.aws`, `~/.docker`,
-  `~/.netrc`, ...) are hidden
+  `~/.netrc`, ...) stay hidden even if a shown folder contains them
 - `/run` is hidden, which removes the Docker, Podman and D-Bus sockets (and, on WSL, the
   interop socket that would otherwise let commands start Windows programs)
 - the project's `.git` is read-only, because git config and hooks run outside the sandbox the
@@ -431,11 +477,44 @@ minutes unless the model asks for longer (up to 10). Inside the sandbox:
 - only a short allowlist of environment variables is passed in, so tokens don't leak
 - other processes are invisible, and everything is killed when the agent exits
 
-`--sandbox off` runs commands without it. That has to be asked for on every run, and is meant
-for places bubblewrap can't work, such as inside a container that already isolates the agent.
-The banner, status line and every approval prompt say whether commands are sandboxed.
+### Container sandbox
 
-What the sandbox can't protect: anything in the project itself (scripts in `package.json`, a
+With `"sandbox": { "type": "container" }` (or `--sandbox container` for one run), commands run
+in a podman (or docker) container instead, one per project for the session, removed when Smith
+exits:
+
+- **What's in it.** The image (`ubi9/ubi` by default, or per project; see
+  [Sandbox settings](#sandbox-settings)), plus the project mounted read-write at the same path,
+  so paths in commands and their output are the same inside and out. Its `.git` is mounted
+  read-only. Nothing else from your machine is there except the `mounts` you list, and skill
+  folders (read-only).
+- **Root, safely.** Commands run as root in the container, so they can `dnf install` or
+  `pip install` what a build needs, without touching your machine. With rootless podman (the
+  normal case on RHEL) that root is your own user outside, so files it makes in the project are
+  yours. With docker running as root, commands run as your user instead and can't install
+  system packages; you're told at startup.
+- **Kept for the session.** Each command runs in the same container (`exec`, about 0.1 s), so
+  `/tmp` and anything installed stay until Smith exits. A timeout or esc kills the command and
+  everything it started inside the container.
+- **The file tools.** Inside the project they work on your disk directly (it's the same
+  folder); anything else, like `read_file /usr/include/stdio.h`, comes from the container,
+  without asking, since nothing of yours is there. Searches in the project run outside, where
+  ripgrep is.
+- **Network.** None (`--network none`) unless turned on. A running container can't change
+  that, so `/network on` replaces it with a new one, without what was installed. Start with
+  `--network` when the agent will need to download things.
+- **SELinux.** On RHEL, the project and mounts are relabelled for containers once (`:z`),
+  which keeps SELinux's protection. For your home folder or `/` that would upset everything
+  else, so then SELinux separation is turned off for that container instead.
+
+The image needs `bash`; `grep`, `find` and `cat` let the file tools reach outside the project.
+The first command waits while the image is pulled, if it isn't on the machine yet.
+
+`--sandbox off` runs commands without any sandbox. That has to be asked for on every run, and is
+meant for places neither can work, such as inside a container that already isolates the agent.
+The banner, status line and every approval prompt say where commands run.
+
+What neither sandbox can protect: anything in the project itself (scripts in `package.json`, a
 `Makefile`, `.envrc`) can still be changed and will run unsandboxed if you run it yourself
 later, and with the network on, commands can reach services on localhost.
 

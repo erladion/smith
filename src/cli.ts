@@ -11,7 +11,7 @@ import { loadPreferences, type Preferences, savePreferences } from "./core/prefe
 import { findRepoRoot, type InstructionFile, loadInstructions } from "./core/instructions.js";
 import { buildSubagentPrompt, buildSystemPrompt } from "./core/prompt.js";
 import { isReasoningLevel, REASONING_LEVELS, type ReasoningLevel } from "./core/reasoning.js";
-import { Sandbox, type SandboxMode } from "./core/sandbox.js";
+import { Sandbox, type SandboxType } from "./core/sandbox.js";
 import { Server } from "./core/server.js";
 import { findSession, listSessions, secureSessions, Session } from "./core/session.js";
 import { loadSkills, type Skill, skillRoots } from "./core/skills.js";
@@ -47,9 +47,10 @@ Server:
   --temperature <n>      Sampling temperature (default: the server's)
   --max-steps <n>        Model calls allowed per message (default: maxSteps in the config file, else 50)
 
-Sandbox (shell commands run in bubblewrap):
-  --sandbox <mode>       on | off (default on: the agent won't start if bubblewrap can't run;
-                         off runs commands unsandboxed and must be asked for explicitly)
+Sandbox (where shell commands and the file tools run):
+  --sandbox <type>       bwrap | container | off (default: sandbox.type in the config file, else
+                         bwrap; Smith won't start if it can't run. "on" means bwrap. off runs
+                         commands unsandboxed and must be asked for on every run)
   --network              Allow sandboxed commands to use the network (default: blocked)
 
 Sessions:
@@ -142,14 +143,14 @@ async function main(): Promise<void> {
     (await server.chooseModel([resumed?.session.model, prefs.models?.[server.baseURL]]));
   const contextSize = parseNumber(values["context-size"], "--context-size") ?? (await server.contextSize(model));
 
-  const sandboxMode = values.sandbox ?? "on";
-  if (!["on", "off"].includes(sandboxMode)) throw new Error("--sandbox must be on or off");
-  const sandbox = Sandbox.create(sandboxMode as SandboxMode, values.network ?? false);
+  const sandboxType = values.sandbox === "on" ? "bwrap" : (values.sandbox ?? config.sandbox.type);
+  if (!["bwrap", "container", "off"].includes(sandboxType)) throw new Error("--sandbox must be bwrap, container or off");
+  const sandbox = Sandbox.create({ ...config.sandbox, type: sandboxType as SandboxType, network: values.network ?? config.sandbox.network });
 
   // The project being worked in; /new <folder> in the TUI switches it.
   let project = loadProject(cwd);
-  sandbox.readOnlyPaths = project.skills.map((s) => s.dir);
-  const warnings = [...config.warnings, ...project.warnings];
+  sandbox.readOnlyPaths = visibleFolders(project);
+  const warnings = [...config.warnings, ...sandbox.warnings, ...project.warnings];
 
   // The session being recorded; /sessions and /new in the TUI switch it.
   let session = resumed?.session ?? Session.create(cwd, model, server.name);
@@ -184,7 +185,7 @@ async function main(): Promise<void> {
 
   if (values.print !== undefined) {
     for (const warning of warnings) process.stderr.write(`[warn] ${warning}\n`);
-    process.stderr.write(`[${server.label} · ${model} · ${sandbox.describe()}]\n`);
+    process.stderr.write(`[${server.label} · ${model} · ${sandbox.describe(project.cwd)}]\n`);
     await runHeadless(createAgent, values.print, values.yes ?? false, server.baseURL);
     process.stderr.write(`[session ${session.id}]\n`);
     return;
@@ -202,7 +203,7 @@ async function main(): Promise<void> {
     switchProject: (folder) => {
       const dir = resolveFolder(folder, project.cwd);
       project = loadProject(dir);
-      sandbox.readOnlyPaths = project.skills.map((s) => s.dir);
+      sandbox.readOnlyPaths = visibleFolders(project);
       return projectView(project, dir);
     },
     configFile: config.file,
@@ -256,6 +257,16 @@ interface Project {
   skills: Skill[];
   tools: ToolDef[];
   warnings: string[];
+}
+
+/**
+ * Folders outside the project that sandboxed commands may read: skill
+ * folders (their scripts run from there), and the repository the project is
+ * in, for a project that's a submodule or a subfolder.
+ */
+function visibleFolders(project: Project): string[] {
+  const repo = findRepoRoot(project.cwd);
+  return [...project.skills.map((s) => s.dir), ...(repo && repo !== project.cwd ? [repo] : [])];
 }
 
 /** Everything that depends on the folder being worked in. */

@@ -223,7 +223,7 @@ describe("approval previews and undo", () => {
 
 let bwrap = true;
 try {
-  Sandbox.create("on", false);
+  Sandbox.create({ type: "bwrap", network: false });
 } catch {
   bwrap = false;
 }
@@ -233,7 +233,7 @@ test("skill folders are readable inside the sandbox", { skip: !bwrap && "bwrap i
   const skills = fs.mkdtempSync(path.join(os.homedir(), ".agent-test-skills-"));
   try {
     write(path.join(skills, "hello.sh"), "echo hello from the skill");
-    const sandbox = Sandbox.create("on", false);
+    const sandbox = Sandbox.create({ type: "bwrap", network: false });
     const ctx = { cwd: project, signal: new AbortController().signal, sandbox };
     const tool = bash as ToolDef;
     const command = `bash ${skills}/hello.sh; touch ${skills}/x 2>&1 | grep -o 'Read-only'`;

@@ -82,7 +82,7 @@ export function statusLine(status: Status, width: number): Line {
   if (context) {
     parts.push(context.limit ? `${Math.round((100 * context.tokens) / context.limit)}% of ${k(context.limit)} context` : `${k(context.tokens)} tokens`);
   }
-  if (sandbox.active) parts.push(`sandbox, net ${sandbox.network ? "on" : "off"}`);
+  if (sandbox.active) parts.push(`${sandbox.type === "container" ? "container" : "sandbox"}, net ${sandbox.network ? "on" : "off"}`);
   if (status.busy) parts.push(status.queueing ? "esc to interrupt · enter queues" : "esc to interrupt");
   const line: Line = sandbox.active ? [] : [{ text: "unsandboxed · ", style: { color: "red" } }];
   line.push({ text: parts.filter(Boolean).join(" · "), style: DIM });

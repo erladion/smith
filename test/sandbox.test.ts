@@ -14,7 +14,7 @@ import type { ToolDef } from "../src/core/tool.js";
 
 let available = true;
 try {
-  Sandbox.create("on", false);
+  Sandbox.create({ type: "bwrap", network: false });
 } catch {
   available = false;
 }
@@ -26,7 +26,7 @@ describe("bash in the sandbox", { skip: !available && "bwrap is not available" }
   const originalHome = process.env.HOME;
 
   const run = (command: string, opts: { network?: boolean; cwd?: string; timeout_ms?: number } = {}) => {
-    const sandbox = Sandbox.create("on", opts.network ?? false);
+    const sandbox = Sandbox.create({ type: "bwrap", network: opts.network ?? false });
     const tool = bash as ToolDef;
     const input = tool.schema.parse({ command, timeout_ms: opts.timeout_ms });
     return tool.run(input, { cwd: opts.cwd ?? project, signal: new AbortController().signal, sandbox });
@@ -128,7 +128,7 @@ describe("bash in the sandbox", { skip: !available && "bwrap is not available" }
   });
 
   test("/tmp is private, starts empty, and is kept between commands", async () => {
-    const sandbox = Sandbox.create("on", false);
+    const sandbox = Sandbox.create({ type: "bwrap", network: false });
     const ctx = { cwd: project, signal: new AbortController().signal, sandbox };
     const tool = bash as ToolDef;
     const sh = (command: string) => tool.run(tool.schema.parse({ command }), ctx);
@@ -142,7 +142,7 @@ describe("bash in the sandbox", { skip: !available && "bwrap is not available" }
   });
 
   test("the file tools read and write through the sandbox", async () => {
-    const sandbox = Sandbox.create("on", false);
+    const sandbox = Sandbox.create({ type: "bwrap", network: false });
     const ctx = { cwd: project, signal: new AbortController().signal, sandbox };
     const call = (tool: ToolDef, input: unknown) => tool.run(tool.schema.parse(input), ctx);
 
@@ -169,7 +169,7 @@ describe("bash in the sandbox", { skip: !available && "bwrap is not available" }
   });
 
   test("the file tools can read the session's /tmp, without asking", async () => {
-    const sandbox = Sandbox.create("on", false);
+    const sandbox = Sandbox.create({ type: "bwrap", network: false });
     const ctx = { cwd: project, signal: new AbortController().signal, sandbox };
     const call = (tool: ToolDef, input: unknown) => tool.run(tool.schema.parse(input), ctx);
     const reason = (tool: ToolDef, input: unknown) => tool.approvalReason?.(tool.schema.parse(input), ctx);
@@ -194,15 +194,108 @@ describe("bash in the sandbox", { skip: !available && "bwrap is not available" }
   });
 });
 
+describe("the home folder in the bwrap sandbox", { skip: !available && "bwrap is not available" }, () => {
+  let home: string;
+  let repo: string;
+  let project: string;
+  const saved = { HOME: process.env.HOME, PATH: process.env.PATH };
+  const ctxFor = (sandbox: Sandbox) => ({ cwd: project, signal: new AbortController().signal, sandbox });
+  const sh = (sandbox: Sandbox, command: string) => (bash as ToolDef).run(bash.schema.parse({ command }), ctxFor(sandbox));
+
+  before(() => {
+    // A home with a repository whose subfolder is the project, another
+    // project with a secret, a tool on PATH, a cache and a shown folder.
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "smith-home-"));
+    repo = path.join(home, "work");
+    project = path.join(repo, "app");
+    fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+    fs.mkdirSync(project, { recursive: true });
+    fs.writeFileSync(path.join(repo, "README.md"), "repo readme\n");
+    fs.mkdirSync(path.join(home, "other"));
+    fs.writeFileSync(path.join(home, "other", "secret.txt"), "hunter2");
+    fs.mkdirSync(path.join(home, "tools", "bin"), { recursive: true });
+    fs.writeFileSync(path.join(home, "tools", "bin", "mytool"), "#!/bin/sh\necho tool ran\n", { mode: 0o755 });
+    fs.writeFileSync(path.join(home, "tools", "lib.txt"), "lib");
+    fs.mkdirSync(path.join(home, "shown"));
+    fs.writeFileSync(path.join(home, "shown", "notes.txt"), "shown notes");
+    process.env.HOME = home;
+    process.env.PATH = `${path.join(home, "tools", "bin")}:${saved.PATH}`;
+  });
+  after(() => {
+    process.env.HOME = saved.HOME;
+    process.env.PATH = saved.PATH;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  const create = () => {
+    const sandbox = Sandbox.create({
+      type: "bwrap",
+      network: false,
+      home: { show: [path.join(home, "shown")], writable: [path.join(home, "cache")] },
+    });
+    sandbox.readOnlyPaths = [repo];
+    return sandbox;
+  };
+
+  test("only the project, tools on PATH and chosen folders show; the rest of home is private", async () => {
+    const sandbox = create();
+    const out = (await sh(sandbox, `cat ~/other/secret.txt 2>&1; mytool; cat ~/tools/lib.txt ~/shown/notes.txt; echo; touch ~/shown/x 2>&1; echo end`)).content;
+    assert.doesNotMatch(out, /hunter2/);
+    assert.match(out, /No such file or directory/);
+    assert.match(out, /tool ran\nlib/, "a bin folder on PATH shows with its parent");
+    assert.match(out, /shown notes/);
+    assert.match(out, /Read-only file system/);
+
+    // Home itself is writable, privately, and kept between commands.
+    await sh(sandbox, "mkdir -p ~/.cache/build && echo cached > ~/.cache/build/x && echo kept > ~/cache/y");
+    assert.equal((await sh(sandbox, "cat ~/.cache/build/x")).content, "cached");
+    assert.ok(!fs.existsSync(path.join(home, ".cache")), "the private home isn't the real one");
+    assert.equal(fs.readFileSync(path.join(home, "cache", "y"), "utf8"), "kept\n", "writable folders are the real ones");
+
+    // The file tools say why a home file is missing.
+    await assert.rejects(sandbox.readFile(path.join(home, "other", "secret.txt"), project), /home folder is hidden in the sandbox/);
+    sandbox.dispose();
+  });
+
+  test("the repository around the project is readable, and the project stays writable", async () => {
+    const sandbox = create();
+    const out = (await sh(sandbox, "cat ../README.md; touch ../new 2>&1; echo made > here.txt && cat here.txt")).content;
+    assert.match(out, /repo readme/);
+    assert.match(out, /Read-only file system/);
+    assert.match(out, /made$/);
+    sandbox.dispose();
+  });
+
+  test("limits apply to shell commands", async () => {
+    const sandbox = Sandbox.create({ type: "bwrap", network: false, limits: { processes: 64 } });
+    const spec = await sandbox.spawnSpec("true", project);
+    if (spec.file === "prlimit") {
+      assert.equal((await sh(sandbox, "ulimit -u")).content, "64");
+    } else {
+      assert.equal(spec.file, "systemd-run");
+      assert.ok(spec.args.includes("TasksMax=64"));
+      assert.equal((await sh(sandbox, "echo ok")).content, "ok");
+    }
+    // Memory and CPU need systemd; without it, the agent says so.
+    const partial = Sandbox.create({ type: "bwrap", network: false, limits: { memory: 1 << 30, processes: 64 } });
+    if ((await partial.spawnSpec("true", project)).file === "prlimit") assert.match(partial.warnings.join(), /memory limit needs systemd-run/);
+    sandbox.dispose();
+    partial.dispose();
+  });
+});
+
 describe("sandbox fallbacks", () => {
-  test("off means plain bash, still without the agent's own API keys", () => {
+  test("off means plain bash, still without Smith's own API keys", async () => {
     process.env.AGENT_API_KEY = "sk-agent";
+    process.env.SMITH_API_KEY = "sk-smith";
     try {
-      const spec = Sandbox.create("off", false).spawnSpec("true", "/");
+      const spec = await Sandbox.create({ type: "off", network: false }).spawnSpec("true", "/");
       assert.equal(spec.file, "bash");
       assert.equal(spec.env.AGENT_API_KEY, undefined);
+      assert.equal(spec.env.SMITH_API_KEY, undefined);
     } finally {
       delete process.env.AGENT_API_KEY;
+      delete process.env.SMITH_API_KEY;
     }
   });
 
@@ -210,8 +303,8 @@ describe("sandbox fallbacks", () => {
     const path = process.env.PATH;
     process.env.PATH = "/nonexistent";
     try {
-      assert.throws(() => Sandbox.create("on", false), /bubblewrap.*not installed[\s\S]*dnf install bubblewrap[\s\S]*--sandbox off/);
-      assert.equal(Sandbox.create("off", false).active, false, "only an explicit off runs unsandboxed");
+      assert.throws(() => Sandbox.create({ type: "bwrap", network: false }), /bubblewrap.*not installed[\s\S]*dnf install bubblewrap[\s\S]*--sandbox off/);
+      assert.equal(Sandbox.create({ type: "off", network: false }).active, false, "only an explicit off runs unsandboxed");
     } finally {
       process.env.PATH = path;
     }

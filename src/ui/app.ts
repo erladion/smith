@@ -184,7 +184,7 @@ export class TuiApp implements UiContext {
       cwd: this.project.cwd,
       session: sessions.currentName() ? `${sessions.currentName()} · ${sessions.currentId()}` : sessions.currentId(),
       resumed: start.resumed,
-      sandbox: { active: sandbox.active, description: sandbox.describe() },
+      sandbox: { active: sandbox.active, description: sandbox.describe(this.project.cwd) },
       instructions: this.project.instructions,
       skills: this.project.skills.map((s) => s.name),
       greeting: this.matrix ? greeting(context) : undefined,
@@ -704,7 +704,11 @@ export class TuiApp implements UiContext {
     if (arg !== "on" && arg !== "off") {
       return this.print({ kind: "notice", level: "info", text: `Network is ${sandbox.network ? "on" : "off"} for sandboxed commands. Use /network on or /network off.` });
     }
+    if (sandbox.network === (arg === "on")) {
+      return this.print({ kind: "notice", level: "info", text: `Network is already ${arg} for sandboxed commands.` });
+    }
     sandbox.network = arg === "on";
-    this.print({ kind: "notice", level: "info", text: `Sandboxed commands now have network ${arg}.` });
+    const restart = sandbox.type === "container" ? " The container was removed for that; the next command starts a new one, without what was installed in the old one." : "";
+    this.print({ kind: "notice", level: "info", text: `Sandboxed commands now have network ${arg}.${restart}` });
   }
 }

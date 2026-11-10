@@ -9,6 +9,17 @@ import { fastTools } from "../toolchain.js";
 import { defineTool, type ToolContext, type ToolResult, truncate } from "../tool.js";
 import { OUTSIDE } from "./files.js";
 
+/**
+ * Where a search of `target` runs. In a container the project is the same
+ * folder inside and out, so it's searched here, where ripgrep is; anything
+ * else is the container's own and is searched inside it.
+ */
+function searchSandbox(ctx: ToolContext, target: string): Sandbox {
+  const sandbox = ctx.sandbox ?? Sandbox.none();
+  if (sandbox.type === "container" && !sandbox.sandboxPath(target, ctx.cwd)) return Sandbox.none();
+  return sandbox;
+}
+
 /** Approval reason for searching a path outside the project. */
 async function outsideReason(p: string | undefined, ctx: ToolContext): Promise<string | undefined> {
   return p && (await resolveForRead(ctx.cwd, p, ctx.sandbox)).outside ? OUTSIDE : undefined;
@@ -40,12 +51,21 @@ export const grep = defineTool({
     [`/${pattern}/`, p && `in ${p}`, glob && `(${glob})`].filter(Boolean).join(" "),
   approvalReason: ({ path: p }, ctx) => outsideReason(p, ctx),
   async run(input, ctx) {
-    const target = input.path ? path.relative(ctx.cwd, (await resolveForRead(ctx.cwd, input.path, ctx.sandbox)).path) || "." : ".";
-    // ripgrep when installed (much faster, respects .gitignore), else grep.
-    const { rg } = fastTools();
-    const sandbox = ctx.sandbox ?? Sandbox.none();
-    let result = rg ? await runSearch(sandbox.programSpec(rg, ripgrepArgs(input, target), ctx.cwd), ctx.cwd, ctx.signal) : undefined;
-    if (!result || result.missing) result = await runSearch(sandbox.programSpec("grep", grepArgs(input, target), ctx.cwd), ctx.cwd, ctx.signal);
+    const absolute = input.path ? (await resolveForRead(ctx.cwd, input.path, ctx.sandbox)).path : ctx.cwd;
+    const target = path.relative(ctx.cwd, absolute) || ".";
+    const sandbox = searchSandbox(ctx, absolute);
+    // ripgrep when installed (much faster, respects .gitignore), else grep. In a
+    // container, this machine's ripgrep isn't there; grep is.
+    const rg = sandbox.type === "container" ? undefined : fastTools().rg;
+    const search = async (cmd: string, args: string[]) => {
+      try {
+        return await runSearch(await sandbox.programSpec(cmd, args, ctx.cwd), ctx.cwd, ctx.signal);
+      } catch (err) {
+        return { output: (err as Error).message, code: 2, missing: false };
+      }
+    };
+    let result = rg ? await search(rg, ripgrepArgs(input, target)) : undefined;
+    if (!result || result.missing) result = await search("grep", grepArgs(input, target));
 
     if (result.missing) return { content: "Neither rg nor grep is installed.", isError: true };
     // Both tools exit 1 for "no matches" and 2 for real errors.
@@ -74,22 +94,29 @@ export const glob = defineTool({
     if (path.isAbsolute(pattern) || pattern.split("/").includes("..")) {
       return { content: "The pattern must be relative and must not contain '..'. Use path to choose where to search.", isError: true };
     }
-    const sandbox = ctx.sandbox ?? Sandbox.none();
-    const base = (await resolveForRead(ctx.cwd, p ?? ".", sandbox)).path;
+    const base = (await resolveForRead(ctx.cwd, p ?? ".", ctx.sandbox)).path;
+    const sandbox = searchSandbox(ctx, base);
     const regex = globToRegExp(pattern);
     const matches: { file: string; mtime: number }[] = [];
 
-    const { rg } = fastTools();
+    const rg = sandbox.type === "container" ? undefined : fastTools().rg;
     // Listed inside the sandbox when it's active, so hidden folders stay hidden.
-    const files = rg
-      ? listFiles(sandbox.programSpec(rg, ripgrepListArgs(), ctx.cwd, { chdir: base }), base, ctx.signal)
-      : sandbox.active
-        ? listFiles(sandbox.programSpec("find", findArgs(), ctx.cwd, { chdir: base }), base, ctx.signal)
-        : walk(base, ctx.signal);
+    let files: AsyncGenerator<{ rel: string; abs: string }>;
+    try {
+      files = rg
+        ? listFiles(await sandbox.programSpec(rg, ripgrepListArgs(), ctx.cwd, { chdir: base }), base, ctx.signal)
+        : sandbox.active
+          ? listFiles(await sandbox.programSpec("find", findArgs(), ctx.cwd, { chdir: base }), base, ctx.signal)
+          : walk(base, ctx.signal);
+    } catch (err) {
+      return { content: (err as Error).message, isError: true };
+    }
     for await (const { rel, abs } of files) {
       if (!regex.test(rel)) continue;
-      // The sandbox's /tmp is somewhere else on the host.
-      const stat = await fs.stat(sandbox.tempPath(abs, ctx.cwd)?.host ?? abs).catch(() => null);
+      // The sandbox's /tmp is somewhere else on this machine, and a container's
+      // own files are nowhere here: those are listed as files, oldest first.
+      const view = sandbox.sandboxPath(abs, ctx.cwd);
+      const stat = view && !view.host ? { isFile: () => true, mtimeMs: 0 } : await fs.stat(view?.host ?? abs).catch(() => null);
       if (!stat?.isFile()) continue;
       matches.push({ file: path.relative(ctx.cwd, abs), mtime: stat.mtimeMs });
       // Collect a few more than we show so the newest files are likely among them.
@@ -149,9 +176,8 @@ function findArgs(): string[] {
 
 /** Runs a file lister in `base` and yields the paths it prints, one per line (relative, maybe "./"-prefixed). */
 async function* listFiles(spec: SpawnSpec, base: string, signal: AbortSignal): AsyncGenerator<{ rel: string; abs: string }> {
-  // In the sandbox, bwrap changes to `base` itself, which may exist only there (its /tmp).
-  const cwd = spec.file === "bwrap" ? undefined : base;
-  const child = spawn(spec.file, spec.args, { cwd, env: spec.env, signal, stdio: ["ignore", "pipe", "ignore"] });
+  // A sandbox changes to `base` itself, which may exist only there (its /tmp).
+  const child = spawn(spec.file, spec.args, { cwd: spec.cwd, env: spec.env, signal, stdio: ["ignore", "pipe", "ignore"] });
   child.on("error", () => {}); // Aborted or missing; the stream simply ends.
   let pending = "";
   let read = 0;
@@ -214,7 +240,13 @@ function runSearch(spec: SpawnSpec, cwd: string, signal: AbortSignal): Promise<S
     child.on("error", (err: NodeJS.ErrnoException) =>
       resolve({ output: err.message, code: null, missing: err.code === "ENOENT" }),
     );
-    // Inside the sandbox, a missing program is bwrap failing to run it.
-    child.on("close", (code) => resolve({ output, code, missing: spec.file === "bwrap" && code === 1 && /^bwrap: execvp /m.test(output) }));
+    child.on("close", (code) => resolve({ output, code, missing: notInstalled(spec.file, code, output) }));
   });
+}
+
+/** Whether a sandboxed run failed because the program isn't there: bwrap or the container runtime says so. */
+function notInstalled(runner: string, code: number | null, output: string): boolean {
+  if (runner === "bwrap") return code === 1 && /^bwrap: execvp /m.test(output);
+  if (runner === "podman" || runner === "docker") return (code === 126 || code === 127) && /executable file not found|no such file or directory/i.test(output);
+  return false;
 }

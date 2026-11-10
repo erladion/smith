@@ -56,15 +56,17 @@ export interface ReadTarget {
  *
  * With a sandbox, /tmp and /var/tmp are the session's private ones (where
  * commands leave build logs and the like): readable without asking, unless
- * a symlink there leads somewhere else.
+ * a symlink there leads somewhere else. In a container, everything outside
+ * the project is the container's own, and reading it never asks.
  */
 export async function resolveForRead(root: string, requested: string, sandbox?: Sandbox): Promise<ReadTarget> {
   const expanded = requested === "~" || requested.startsWith("~/") ? path.join(os.homedir(), requested.slice(1)) : requested;
   const target = path.resolve(root, expanded);
   const real = await realpathAllowingMissing(target);
   if (isInside(await fs.realpath(root), real)) return { path: target, outside: false };
-  const temp = sandbox?.tempPath(target, root);
-  if (temp) {
+  const temp = sandbox?.sandboxPath(target, root);
+  if (temp && (!temp.host || !temp.root)) return { path: target, outside: false };
+  if (temp?.host && temp.root) {
     const realTemp = await realpathAllowingMissing(temp.host);
     if (isInside(await fs.realpath(temp.root), realTemp)) return { path: target, outside: false, hostPath: temp.host };
     if (isHiddenFromAgent(realTemp)) throw new Error(`${requested} is off limits: it leads to a place hidden from the agent.`);

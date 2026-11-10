@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { configDir } from "./dirs.js";
+import type { ContainerSettings, Limits } from "./sandbox.js";
 import { z } from "zod";
 
 /**
@@ -33,6 +35,34 @@ const EndpointSchema = z
   })
   .refine((e) => !(e.apiKey && e.apiKeyEnv), "set apiKey or apiKeyEnv, not both");
 
+const SIZE = /^(\d+(?:\.\d+)?)\s*([kmgt]?)i?b?$/i;
+
+const SandboxSchema = z.strictObject({
+  type: z.enum(["bwrap", "container"]).optional().describe("bwrap (default) or container; --sandbox off is only ever per run"),
+  network: z.boolean().optional().describe("Let commands use the network from the start (default false)"),
+  limits: z
+    .strictObject({
+      memory: z.string().regex(SIZE, 'a size such as "8g" or "512m"').optional(),
+      processes: z.number().int().positive().optional(),
+      cpus: z.number().positive().optional(),
+    })
+    .optional(),
+  home: z
+    .strictObject({
+      show: z.array(z.string()).optional().describe("Home folders shown read-only in the bwrap sandbox"),
+      writable: z.array(z.string()).optional().describe("Home folders shown read-write, e.g. build caches"),
+    })
+    .optional(),
+  container: z
+    .strictObject({
+      runtime: z.enum(["podman", "docker"]).optional(),
+      image: z.string().min(1).optional(),
+      mounts: z.array(z.string().min(1)).optional(),
+    })
+    .optional(),
+  projects: z.record(z.string(), z.strictObject({ image: z.string().min(1).optional(), mounts: z.array(z.string().min(1)).optional() })).optional(),
+});
+
 const ConfigSchema = z.strictObject({
   default: z.string().optional(),
   maxSteps: z.number().int().min(1).max(10_000).optional().describe("Model calls allowed per message before the agent stops"),
@@ -40,8 +70,21 @@ const ConfigSchema = z.strictObject({
   toolLog: z.boolean().optional().describe("Log every tool call to ~/.local/share/smith/logs (default true)"),
   theme: z.enum(["matrix", "plain"]).optional().describe("matrix: digital rain, katakana spinner and Agent Smith's lines (default); plain: none of it"),
   codeStream: z.boolean().optional().describe("With the matrix theme, a stream of glyphs at the end of the status line while idle (default true)"),
+  sandbox: SandboxSchema.optional(),
   endpoints: z.record(z.string(), EndpointSchema).default({}),
 });
+
+/** The image used in container mode when the config names none. */
+export const DEFAULT_IMAGE = "registry.access.redhat.com/ubi9/ubi:latest";
+
+/** The sandbox settings, with defaults filled in and ~ expanded. */
+export interface SandboxConfig {
+  type: "bwrap" | "container";
+  network: boolean;
+  limits?: Limits;
+  home: { show: string[]; writable: string[] };
+  container: ContainerSettings;
+}
 
 export interface Endpoint {
   name: string;
@@ -67,6 +110,7 @@ export interface Config {
   theme: Theme;
   /** Whether the matrix theme shows the idle stream of glyphs in the status line. */
   codeStream: boolean;
+  sandbox: SandboxConfig;
   /** Problems worth telling the user about that don't stop the agent. */
   warnings: string[];
 }
@@ -95,7 +139,9 @@ export function loadConfig(file = configPath()): Config {
   try {
     raw = fs.readFileSync(file, "utf8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { file, endpoints: [], subagents: true, toolLog: true, theme: "matrix", codeStream: true, warnings: [] };
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { file, endpoints: [], subagents: true, toolLog: true, theme: "matrix", codeStream: true, sandbox: sandboxConfig(undefined), warnings: [] };
+    }
     throw err;
   }
 
@@ -128,5 +174,35 @@ export function loadConfig(file = configPath()): Config {
     warnings.push(`${file} contains API keys but other users can read it. Run: chmod 600 ${file}`);
   }
 
-  return { file, endpoints, defaultEndpoint: config.default, maxSteps: config.maxSteps, subagents: config.subagents ?? true, toolLog: config.toolLog ?? true, theme: config.theme ?? "matrix", codeStream: config.codeStream ?? true, warnings };
+  return { file, endpoints, defaultEndpoint: config.default, maxSteps: config.maxSteps, subagents: config.subagents ?? true, toolLog: config.toolLog ?? true, theme: config.theme ?? "matrix", codeStream: config.codeStream ?? true, sandbox: sandboxConfig(config.sandbox), warnings };
+}
+
+function sandboxConfig(raw: z.output<typeof SandboxSchema> | undefined): SandboxConfig {
+  const limits = raw?.limits && { memory: raw.limits.memory ? parseSize(raw.limits.memory) : undefined, processes: raw.limits.processes, cpus: raw.limits.cpus };
+  return {
+    type: raw?.type ?? "bwrap",
+    network: raw?.network ?? false,
+    limits,
+    home: { show: (raw?.home?.show ?? []).map(homePath), writable: (raw?.home?.writable ?? []).map(homePath) },
+    container: {
+      runtime: raw?.container?.runtime ?? "podman",
+      image: raw?.container?.image ?? DEFAULT_IMAGE,
+      mounts: raw?.container?.mounts ?? [],
+      projects: Object.entries(raw?.projects ?? {}).map(([folder, p]) => ({ folder: homePath(folder), image: p.image, mounts: p.mounts ?? [] })),
+    },
+  };
+}
+
+/** "~/x" or a path relative to the home folder, as an absolute path. */
+function homePath(p: string): string {
+  const expanded = p === "~" || p.startsWith("~/") ? path.join(os.homedir(), p.slice(1)) : p;
+  return path.resolve(os.homedir(), expanded).replace(/\/+$/, "") || "/";
+}
+
+/** "8g", "512m", "1.5GB" or plain bytes, in bytes. */
+export function parseSize(text: string): number {
+  const match = SIZE.exec(text.trim());
+  if (!match) throw new Error(`Not a size: ${text}`);
+  const power = " kmgt".indexOf((match[2] || " ").toLowerCase());
+  return Math.round(Number(match[1]) * 1024 ** power);
 }

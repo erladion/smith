@@ -686,7 +686,7 @@ export class Agent {
         input: args,
         preview,
         note: reason,
-        sandbox: tool.sandboxed ? { active: sandbox.active, description: sandbox.describe() } : undefined,
+        sandbox: tool.sandboxed ? { active: sandbox.active, description: sandbox.describe(this.opts.cwd) } : undefined,
       });
       if (decision === "deny" || signal.aborted) {
         approval = "denied";
