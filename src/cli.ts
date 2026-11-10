@@ -175,7 +175,7 @@ async function main(): Promise<void> {
       maxSteps,
       sandbox,
       tools: project.tools,
-      systemPrompt: buildSystemPrompt(project.cwd, { instructions, skills, fastTools: fastTools(), canAsk: Boolean(hooks.ask) }),
+      systemPrompt: buildSystemPrompt(project.cwd, { instructions, skills, fastTools: fastTools(), canAsk: Boolean(hooks.ask), sandbox: sandbox.promptNotes(project.cwd) }),
       subagentPrompt: config.subagents ? buildSubagentPrompt(project.cwd, { instructions, skills }) : undefined,
       onHistory: (change) => session.record(change),
       onToolRun: toolLog && ((run) => toolLog.write(run)),

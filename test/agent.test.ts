@@ -306,7 +306,7 @@ test("a sub-agent investigates in its own context and only its report comes back
   assert.equal(child.messages[0].content, "SUBAGENT PROMPT");
   assert.deepEqual(child.messages.slice(1), [{ role: "user", content: "Where is the port configured?" }]);
   const childTools = child.tools.map((t: { function: { name: string } }) => t.function.name).sort();
-  assert.deepEqual(childTools, ["glob", "grep", "read_file"], "read-only tools only, no nested task tool");
+  assert.deepEqual(childTools, ["glob", "grep", "list_files", "read_file"], "read-only tools only, no nested task tool");
 
   const parentAfter = fake.requests[3]!.messages;
   assert.equal(parentAfter.at(-1).content, "The port is set in config/server.ts:12.");

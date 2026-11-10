@@ -10,7 +10,7 @@ import { parseMount } from "../src/core/container.js";
 import { Sandbox } from "../src/core/sandbox.js";
 import { bash } from "../src/core/tools/bash.js";
 import { editFile, readFile, writeFile } from "../src/core/tools/files.js";
-import { glob, grep } from "../src/core/tools/search.js";
+import { glob, grep, list } from "../src/core/tools/search.js";
 import type { ToolDef } from "../src/core/tool.js";
 
 const MINIMAL = "registry.access.redhat.com/ubi9/ubi-minimal:latest";
@@ -77,6 +77,15 @@ describe("the container sandbox", { skip: !available && "docker or the ubi9 imag
     assert.match(sandbox.describe(project), /in a docker container \(.*ubi-minimal.*\): only the project and 2 mounts, network off/);
   });
 
+  test("it describes itself to the model, and explains failures it causes", async () => {
+    const notes = sandbox.promptNotes(project).join("\n");
+    assert.match(notes, /docker container from the image .*ubi-minimal/);
+    assert.match(notes, /as the user's own account/, "root docker: commands run as you");
+    assert.match(notes, new RegExp(`and ${shared} \\(read-only\\)`));
+    assert.match(await sh(`touch ${shared}/x`), /\[Sandbox: the path above is read-only in the container/);
+    assert.match(sandbox.explainFailure("Error: This command has to be run with superuser privileges (under the root user on most systems). Permission denied", project) ?? "", /installing system packages isn't possible/);
+  });
+
   test("one container for the session: /tmp and the like last between commands", async () => {
     await sh("echo kept > /tmp/state");
     assert.equal(await sh("cat /tmp/state"), "kept");
@@ -94,6 +103,7 @@ describe("the container sandbox", { skip: !available && "docker or the ubi9 imag
     assert.match((await call(readFile, { path: "/tmp/logs/build.log" })).content, /error: boom/);
     assert.match((await call(glob, { pattern: "*.log", path: "/tmp/logs" })).content, /build\.log/);
     assert.match((await call(grep, { pattern: "boom", path: "/tmp/logs" })).content, /build\.log:1:error: boom/);
+    assert.match((await call(list, { path: "/tmp/logs" })).content, /^\/tmp\/logs\/ \(1 file\)\n {2}build\.log$/);
     // In the project, searches run here.
     assert.match((await call(grep, { pattern: "beta" })).content, /src\/a\.txt:1:beta/);
     assert.match((await call(glob, { pattern: "**/*.txt" })).content, /hello\.txt/);
@@ -131,6 +141,31 @@ describe("the container sandbox", { skip: !available && "docker or the ubi9 imag
       assert.doesNotMatch(res.content, /microdnf/);
     } finally {
       own.dispose();
+    }
+  });
+});
+
+describe("variables in the container", { skip: !available && "docker or the ubi9 images aren't available" }, () => {
+  test("sandbox.env reaches commands; proxies only with the network on", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "smith-container-env-"));
+    const saved = process.env.HTTPS_PROXY;
+    process.env.HTTPS_PROXY = "http://proxy.example:3128";
+    const sandbox = Sandbox.create({
+      type: "container",
+      network: false,
+      env: ["BUILD_MODE=release"],
+      container: { runtime: "docker", image: MINIMAL, mounts: [], projects: [] },
+    });
+    try {
+      const sh = async (command: string) => (await (bash as ToolDef).run(bash.schema.parse({ command }), { cwd: dir, signal: new AbortController().signal, sandbox })).content;
+      assert.equal(await sh('echo "$BUILD_MODE|$HTTPS_PROXY"'), "release|");
+      sandbox.network = true;
+      assert.equal(await sh('echo "$BUILD_MODE|$HTTPS_PROXY"'), "release|http://proxy.example:3128");
+    } finally {
+      sandbox.dispose();
+      if (saved === undefined) delete process.env.HTTPS_PROXY;
+      else process.env.HTTPS_PROXY = saved;
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

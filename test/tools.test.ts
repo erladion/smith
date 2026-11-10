@@ -6,7 +6,7 @@ import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { bash } from "../src/core/tools/bash.js";
 import { editFile, readFile, writeFile } from "../src/core/tools/files.js";
-import { glob, grep } from "../src/core/tools/search.js";
+import { glob, grep, list } from "../src/core/tools/search.js";
 import { buildSystemPrompt } from "../src/core/prompt.js";
 import { fastTools, resetFastTools } from "../src/core/toolchain.js";
 import type { ToolContext, ToolDef } from "../src/core/tool.js";
@@ -186,5 +186,34 @@ describe("bash tool", () => {
     assert.equal(res.isError, true);
     assert.match(res.content, /timed out/);
     assert.ok(Date.now() - started < 3000);
+  });
+});
+
+describe("list_files", () => {
+  let base: string;
+  before(async () => {
+    base = path.join(dir, "tree");
+    const write = (rel: string) => fs.mkdir(path.dirname(path.join(base, rel)), { recursive: true }).then(() => fs.writeFile(path.join(base, rel), ""));
+    for (const rel of ["README.md", "src/main.ts", "src/lib/a.ts", "src/lib/deep/b.ts", "node_modules/x/index.js"]) await write(rel);
+    for (let i = 0; i < 45; i++) await write(`many/f${String(i).padStart(2, "0")}.txt`);
+  });
+
+  test("a tree, folders first, deeper folders collapsed to a count, skipped folders left out", async () => {
+    const out = (await run(list, { path: "tree" })).content;
+    assert.equal(
+      out.split("\n").filter((l) => !l.includes("many/") && !/^ {4}f\d\d\.txt|more files$/.test(l)).join("\n"),
+      ["tree/ (49 files)", "  src/", "    lib/ (2 files)", "    main.ts", "  README.md"].join("\n"),
+    );
+    assert.match(out, /^ {2}many\/\n {4}f00\.txt/m);
+    assert.match(out, /^ {4}… 5 more files$/m, "at most 40 files per folder");
+    assert.match((await run(list, { path: "tree", depth: 1 })).content, /^ {2}src\/ \(3 files\)$/m);
+    assert.match((await run(list, { path: "tree", depth: 3 })).content, /^ {6}deep\/ \(1 file\)$/m);
+  });
+
+  test("says what's wrong with a file, a missing folder or an empty one", async () => {
+    assert.match((await run(list, { path: "tree/README.md" })).content, /is a file; read it with read_file/);
+    assert.match((await run(list, { path: "nope" })).content, /nope doesn't exist/);
+    await fs.mkdir(path.join(dir, "empty"));
+    assert.match((await run(list, { path: "empty" })).content, /empty is empty/);
   });
 });

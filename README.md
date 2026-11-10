@@ -200,6 +200,7 @@ configured endpoint they weren't set for.
 |---|---|---|
 | `type` | `"bwrap"` | `"bwrap"` or `"container"` ([which to pick](#shell-sandbox)); `--sandbox bwrap\|container\|off` overrides it for one run, and off can't be set here |
 | `network` | `false` | whether commands can use the network from the start; `--network` and `/network` change it |
+| `env` | `[]` | more environment variables for commands: `"NAME"` passes yours through, `"NAME=value"` sets one. bwrap already passes the basics, what compilers and build tools read (`CC`, `CFLAGS`, `LD_LIBRARY_PATH`, `PKG_CONFIG_PATH`, `CMAKE_*`, `JAVA_HOME`, `GOFLAGS`, ...), what `gcc-toolset`, `scl` and environment modules set, proxies and CA bundles, but nothing that commonly holds credentials (`NPM_CONFIG_*`, `PIP_INDEX_URL`). A container gets only these and the proxies (when the network is on); the rest comes with its image |
 | `limits` | none | caps for each command: `memory` (`"8g"`, `"512m"`; swap counts too), `processes`, `cpus`. With bwrap they need `systemd-run --user`, which RHEL has; without it only `processes` applies, and you're told |
 | `home.show` | `[]` | bwrap: home folders shown read-only |
 | `home.writable` | `[]` | bwrap: home folders shared read-write (created if missing), e.g. build caches to keep |
@@ -324,6 +325,14 @@ their scripts can run.
   four answers. Pick one with ↑/↓ and enter or its number, or type your own answer; esc
   dismisses the question and interrupts. With `-p` nobody can answer, so the tool isn't offered
   and the model is told to state its assumptions instead.
+- **It knows where it runs.** The system prompt says what the sandbox allows (what's writable,
+  what's visible, the network, whether it can install packages), and how to approach a build: find
+  the project's own build command first, give long builds a bigger timeout, start from the first
+  error. When a command fails because of the sandbox (a read-only path, no network, a file in the
+  hidden part of home), the result says so, so the model doesn't "fix" code that was fine.
+- **Long output keeps its errors.** Command output over 20,000 characters is cut, keeping the
+  start, the end, and the lines in between that look like errors (with the two lines after each,
+  where compilers show the code).
 - **Fast tools.** `rg` (ripgrep), `fd` and `jq` are detected at startup. The `grep` tool uses
   ripgrep when it's there (else grep), `glob` lists files with `rg --files` (faster on big
   repositories, and skips what `.gitignore` ignores), and the system prompt tells the model which
@@ -410,7 +419,7 @@ src/core/reasoning.ts    reasoning levels -> request fields
 src/core/think.ts        streaming <think> tag parser
 src/core/sandbox.ts      bubblewrap sandbox for shell commands
 src/core/glob.ts         glob matching for the glob tool
-src/core/tools/          read_file, grep, glob, write_file, edit_file, bash, skill, task,
+src/core/tools/          read_file, list_files, grep, glob, write_file, edit_file, bash, skill, task,
                          todo_write, ask_user
 src/core/instructions.ts AGENTS.md loading
 src/core/skills.ts       skill discovery and SKILL.md headers
@@ -428,14 +437,15 @@ test/                    unit tests, and loop tests against a fake streaming ser
 
 ## Security
 
-`read_file`, `grep` and `glob` run without asking inside the project. They can also read
-outside it (absolute paths, `../`, `~/`), for example the main repository when you work in a
-submodule; that asks first. `write_file`, `edit_file` and `bash` always ask, with an option to
+`read_file`, `list_files`, `grep` and `glob` run without asking inside the project. They can
+also read outside it (absolute paths, `../`, `~/`), for example the main repository when you
+work in a submodule; that asks first. `write_file`, `edit_file` and `bash` always ask, with an option to
 always allow that tool for the rest of the session. Writing is confined to the project, and
 never into `.git`.
 
 The file tools read and write inside the same sandbox as `bash` (below), so they can reach
-exactly what commands can, and `grep` and `glob` run their searches and listings in it too.
+exactly what commands can, and `grep`, `glob` and `list_files` run their searches and listings
+in it too.
 Before that, the agent checks the path itself, to give clear errors: some places are off limits
 even with approval, the same ones the sandbox hides from commands (credentials and shell history
 in your home folder, `/tmp`, `/run`, `/mnt`, the agent's own config and sessions), and also
@@ -444,9 +454,9 @@ can't lead there. With `--sandbox off`, only these checks apply. Since the reads
 sandbox, a read outside the project finds only what the sandbox shows: with bwrap, most of your
 home folder isn't there; in a container, it's the container's own files.
 
-With the sandbox, `/tmp` and `/var/tmp` are the session's private ones (below), so `read_file`,
-`grep` and `glob` read them without asking: a build log a command left there is one read away. A
-symlink in there that leads elsewhere counts as a read outside the project, and asks.
+With the sandbox, `/tmp` and `/var/tmp` are the session's private ones (below), so the read-only
+tools read them without asking: a build log a command left there is one read away. A symlink in
+there that leads elsewhere counts as a read outside the project, and asks.
 
 ### Shell sandbox
 

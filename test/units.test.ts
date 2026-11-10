@@ -11,6 +11,8 @@ import type { Message } from "../src/core/history.js";
 import { defaultName, findSession, listSessions, secureSessions, Session, sessionsDir } from "../src/core/session.js";
 import { loadPreferences, savePreferences } from "../src/core/preferences.js";
 import { ThinkTagParser } from "../src/core/think.js";
+import { truncateLog } from "../src/core/tool.js";
+import { buildSystemPrompt } from "../src/core/prompt.js";
 import { ToolLog, toolLogFile } from "../src/core/toollog.js";
 
 describe("ThinkTagParser", () => {
@@ -253,5 +255,30 @@ describe("the rename from agent to Smith", () => {
       process.env.XDG_DATA_HOME = saved.data;
       fs.rmSync(base, { recursive: true, force: true });
     }
+  });
+});
+
+describe("long command output", () => {
+  test("keeps the error lines from the part that's cut, with the lines after them", () => {
+    const lines = [];
+    for (let i = 0; i < 2000; i++) lines.push(`compiling module ${i} ... ok`);
+    lines[900] = "src/parser.c:41:7: error: 'tokn' undeclared (first use in this function)";
+    lines[901] = "   41 |   if (tokn == END) {";
+    lines[902] = "      |       ^~~~";
+    lines[1200] = "Build summary: 0 errors in the cache step";
+    const out = truncateLog(lines.join("\n"), 4_000);
+    assert.ok(out.length <= 4_400, `${out.length}`);
+    assert.match(out, /^compiling module 0 \.\.\. ok/);
+    assert.match(out, /\[\.\.\. \d+ lines omitted \.\.\.\]\nsrc\/parser\.c:41:7: error: 'tokn' undeclared.*\n {3}41 \| {3}if \(tokn == END\) \{\n {6}\| {7}\^~~~\n\[\.\.\./);
+    assert.doesNotMatch(out, /0 errors in the cache step/);
+    assert.match(out, /compiling module 1999 \.\.\. ok$/);
+    assert.equal(truncateLog("short", 100), "short");
+  });
+
+  test("the prompt tells the model where commands run and how to build", () => {
+    const prompt = buildSystemPrompt("/p", { sandbox: ["Commands run in a test sandbox."] });
+    assert.match(prompt, /Where commands run:\n- Commands run in a test sandbox\./);
+    assert.match(prompt, /find out how this project does it/);
+    assert.match(prompt, /larger timeout_ms/);
   });
 });

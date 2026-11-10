@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { z } from "zod";
 import { Sandbox, type SpawnSpec } from "../sandbox.js";
-import { defineTool, truncate } from "../tool.js";
+import { defineTool, truncateLog } from "../tool.js";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -69,13 +69,15 @@ export const bash = defineTool({
 
       child.on("error", (err) => finish({ content: `Failed to start ${spec.file}: ${err.message}`, isError: true }));
       child.on("close", (code) => {
-        const body = truncate(output.trimEnd(), MAX_OUTPUT_CHARS) || "(no output)";
+        const body = truncateLog(output.trimEnd(), MAX_OUTPUT_CHARS) || "(no output)";
         if (stoppedBy === "timeout") {
           finish({ content: `${body}\n\n[Command timed out after ${timeout_ms}ms and was killed]`, isError: true });
         } else if (stoppedBy === "interrupt") {
           finish({ content: `${body}\n\n[Command interrupted by the user]`, isError: true });
         } else if (code !== 0) {
-          finish({ content: `${body}\n\n[Exit code ${code}]`, isError: true });
+          // When it looks like the sandbox's doing, say so, or a model may "fix" code that was fine.
+          const note = (ctx.sandbox ?? Sandbox.none()).explainFailure(output, ctx.cwd);
+          finish({ content: `${body}\n\n[Exit code ${code}]${note ? `\n${note}` : ""}`, isError: true });
         } else {
           finish({ content: body });
         }

@@ -11,6 +11,8 @@ export interface PromptExtras {
   fastTools?: FastTools;
   /** The user can be asked questions (ask_user); not in non-interactive runs. */
   canAsk?: boolean;
+  /** Where commands run and what they can reach, from the sandbox. */
+  sandbox?: string[];
 }
 
 export function buildSystemPrompt(cwd: string, extras: PromptExtras = {}): string {
@@ -23,34 +25,42 @@ Environment:
 How to work:
 - Use the tools to look at the actual code before answering questions about it or changing it.
 - Read a file before editing it. Use edit_file for targeted changes and write_file for new files or full rewrites.
-- File paths are relative to the working directory. You can only change files inside it. read_file, grep and glob can also read outside it (absolute paths, ../, ~/); the user is asked first, and credential folders are off limits.
+- File paths are relative to the working directory. You can only change files inside it. read_file, list_files, grep and glob can also read outside it (absolute paths, ../, ~/); the user is asked first, and credential folders are off limits.
 - Shell commands run non-interactively in bash. Prefer quick, targeted commands and avoid ones that wait for input.${fastToolsLine(extras.fastTools)}
 - For a task with several steps, write a checklist with todo_write first and update it as you go, so neither you nor the user loses track. Work through it until every step is done.${
     extras.canAsk
       ? "\n- If the request is ambiguous or needs a decision only the user can make, ask with ask_user rather than guessing. Don't ask about what you can find out yourself."
       : "\n- Nobody can answer questions during this run: make reasonable assumptions, and say what you assumed."
   }
+- Before building or testing, find out how this project does it (README, AGENTS.md, Makefile, package.json scripts, CMakeLists.txt, pom.xml, build.gradle, pyproject.toml) and use that command; then keep using it.
+- Builds and test suites can take minutes: give bash a larger timeout_ms for them (up to 600000).
+- When a build or test fails, read the first error before changing anything; later errors often follow from it.
 - After making a change, check it when you can, for example by running the build or tests.
 - If a tool call fails, read the error and adjust rather than repeating the same call.
 - When you need several independent lookups (reading files, searching), ask for them in one response: read-only tools run in parallel.
 - For open-ended investigations that would take many file reads, use the task tool: a sub-agent does the reading in its own context and returns a short report, which keeps this conversation small. Independent investigations can run as several task calls at once.
 - The user may send messages while you work; they arrive as new user messages between tool results. Take them into account and adjust your plan.
-- When the task is done, reply with a short summary of what you did. The terminal renders basic Markdown (bold, italics, inline code, lists, headings, fenced code blocks) but not tables or images.${contextSections(extras)}`;
+- When the task is done, reply with a short summary of what you did. The terminal renders basic Markdown (bold, italics, inline code, lists, headings, fenced code blocks) but not tables or images.${sandboxSection(extras.sandbox)}${contextSections(extras)}`;
 }
 
 /** The system prompt for sub-agents run by the task tool. */
 export function buildSubagentPrompt(cwd: string, extras: PromptExtras = {}): string {
-  return `You are a sub-agent of a coding agent working in the user's terminal. You've been given one investigation. Use the read-only tools (read_file, grep, glob, and skill if available) to answer it, then reply with a report.
+  return `You are a sub-agent of a coding agent working in the user's terminal. You've been given one investigation. Use the read-only tools (read_file, list_files, grep, glob, and skill if available) to answer it, then reply with a report.
 
 Environment:
 - Working directory: ${cwd}
 - Platform: ${os.platform()} ${os.release()}
 
 How to work:
-- Search first (grep, glob), then read only what you need. Ask for several independent lookups in one response: they run in parallel.
+- Get the layout with list_files, search (grep, glob), then read only what you need. Ask for several independent lookups in one response: they run in parallel.
 - You can't change files or run commands, and the user doesn't see your work: only your final reply goes back to the agent that asked.
 - Paths outside the working directory can be read too; the user is asked first.
 - Your final reply is the report. Make it concise and specific: answer the question, cite file paths with line numbers, and quote short code snippets where they help. Say what you couldn't find instead of guessing.${contextSections(extras)}`;
+}
+
+/** Where commands run, so failures caused by the sandbox aren't mistaken for bugs. */
+function sandboxSection(notes: string[] = []): string {
+  return notes.length ? `\n\nWhere commands run:\n${notes.map((n) => `- ${n}`).join("\n")}` : "";
 }
 
 /** Points the model at faster tools that are actually installed. */

@@ -74,6 +74,62 @@ export function describeCall(tools: ToolDef[], name: string, args: string): stri
   return truncate(args, 200);
 }
 
+/** Lines that usually say what went wrong in build and test output. */
+const PROBLEM =
+  /\b(error|errors|failed|failure|fatal|exception|traceback|panic|undefined reference|cannot find|not found|no such file|segmentation fault|assert(ion)?)\b|^\s*(E|F)\s|✗|✖/i;
+const NOT_A_PROBLEM = /\b0 (errors?|failed|failures)\b|-Werror|\berror(s)?: 0\b/i;
+
+/**
+ * Cuts long command output like `truncate`, but keeps the lines that look
+ * like errors (with the two lines after each, where compilers show the
+ * code) from the part that would be dropped: in a long build log the first
+ * error is often in the middle.
+ */
+export function truncateLog(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const headBudget = Math.floor(maxChars * 0.2);
+  const tailBudget = Math.floor(maxChars * 0.4);
+  const lines = text.split("\n");
+
+  let head = 0;
+  for (let used = 0; head < lines.length && used + lines[head]!.length + 1 <= headBudget; head++) used += lines[head]!.length + 1;
+  let tail = lines.length;
+  for (let used = 0; tail > head && used + lines[tail - 1]!.length + 1 <= tailBudget; tail--) used += lines[tail - 1]!.length + 1;
+
+  // Error lines from the middle, earliest first, until their budget runs out.
+  const middleBudget = maxChars - headBudget - tailBudget;
+  const kept = new Set<number>();
+  let used = 0;
+  for (let i = head; i < tail && used < middleBudget; i++) {
+    const line = lines[i]!;
+    if (!PROBLEM.test(line) || NOT_A_PROBLEM.test(line)) continue;
+    for (let j = i; j < Math.min(i + 3, tail); j++) {
+      if (kept.has(j)) continue;
+      const cost = Math.min(lines[j]!.length, 500) + 1;
+      if (used + cost > middleBudget) break;
+      kept.add(j);
+      used += cost;
+    }
+  }
+
+  const out = lines.slice(0, head);
+  let gap = 0;
+  const flushGap = () => {
+    if (gap) out.push(`[... ${gap} line${gap === 1 ? "" : "s"} omitted ...]`);
+    gap = 0;
+  };
+  for (let i = head; i < tail; i++) {
+    if (kept.has(i)) {
+      flushGap();
+      out.push(lines[i]!.length > 500 ? `${lines[i]!.slice(0, 500)}…` : lines[i]!);
+    } else gap++;
+  }
+  flushGap();
+  const result = [...out, ...lines.slice(tail)].join("\n");
+  // A few enormous lines can still blow the budget; fall back to plain cutting.
+  return result.length <= maxChars * 1.1 ? result : truncate(result, maxChars);
+}
+
 /** Keeps the head and tail of long output so the model sees both ends. */
 export function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;

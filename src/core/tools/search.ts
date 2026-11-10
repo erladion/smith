@@ -99,15 +99,9 @@ export const glob = defineTool({
     const regex = globToRegExp(pattern);
     const matches: { file: string; mtime: number }[] = [];
 
-    const rg = sandbox.type === "container" ? undefined : fastTools().rg;
-    // Listed inside the sandbox when it's active, so hidden folders stay hidden.
     let files: AsyncGenerator<{ rel: string; abs: string }>;
     try {
-      files = rg
-        ? listFiles(await sandbox.programSpec(rg, ripgrepListArgs(), ctx.cwd, { chdir: base }), base, ctx.signal)
-        : sandbox.active
-          ? listFiles(await sandbox.programSpec("find", findArgs(), ctx.cwd, { chdir: base }), base, ctx.signal)
-          : walk(base, ctx.signal);
+      files = await allFiles(ctx, sandbox, base);
     } catch (err) {
       return { content: (err as Error).message, isError: true };
     }
@@ -130,6 +124,106 @@ export const glob = defineTool({
     return { content: shown.join("\n") + more };
   },
 });
+
+const MAX_LIST_DEPTH = 6;
+const MAX_LIST_LINES = 300;
+const MAX_FILES_PER_FOLDER = 40;
+
+export const list = defineTool({
+  name: "list_files",
+  description:
+    "Show what's in a folder as a tree: folders first, then files, a couple of levels deep. Deeper folders " +
+    "are collapsed to a file count. Use it to get the layout of a project or a folder; use glob to find files " +
+    "by name. Skips .git, node_modules, common build directories and (when ripgrep is installed) anything in " +
+    ".gitignore.",
+  schema: z.object({
+    path: z.string().optional().describe("The folder (default: the working directory); may be outside it, which asks the user"),
+    depth: z.number().int().min(1).max(MAX_LIST_DEPTH).optional().describe("Levels of folders to open (default 2)"),
+  }),
+  readOnly: true,
+  summarize: ({ path: p, depth }) => `${p ?? "."}${depth ? ` (depth ${depth})` : ""}`,
+  approvalReason: ({ path: p }, ctx) => outsideReason(p, ctx),
+  async run({ path: p, depth = 2 }, ctx): Promise<ToolResult> {
+    const base = (await resolveForRead(ctx.cwd, p ?? ".", ctx.sandbox)).path;
+    const sandbox = searchSandbox(ctx, base);
+    const shown = p ?? ".";
+    // Check it's a folder, where it's on this machine at all (not a container's own).
+    const view = sandbox.sandboxPath(base, ctx.cwd);
+    if (!view || view.host) {
+      const stat = await fs.stat(view?.host ?? base).catch(() => null);
+      if (!stat) return { content: `${shown} doesn't exist.`, isError: true };
+      if (!stat.isDirectory()) return { content: `${shown} is a file; read it with read_file.`, isError: true };
+    }
+
+    const root = newFolder();
+    let total = 0;
+    try {
+      for await (const { rel } of await allFiles(ctx, sandbox, base)) {
+        total++;
+        const parts = rel.split("/");
+        let folder = root;
+        folder.count++;
+        for (const name of parts.slice(0, -1)) {
+          let next = folder.folders.get(name);
+          if (!next) folder.folders.set(name, (next = newFolder()));
+          next.count++;
+          folder = next;
+        }
+        folder.files.push(parts.at(-1)!);
+      }
+    } catch (err) {
+      return { content: (err as Error).message, isError: true };
+    }
+    if (total === 0) return { content: `${shown} is empty (or holds only skipped folders).` };
+
+    const lines: string[] = [`${shown.replace(/\/+$/, "")}/ (${fileCount(total)})`];
+    let cut = false;
+    const add = (line: string) => {
+      if (lines.length > MAX_LIST_LINES) return (cut = true), false;
+      lines.push(line);
+      return true;
+    };
+    const render = (folder: Folder, level: number, indent: string): void => {
+      for (const [name, sub] of [...folder.folders].sort(([a], [b]) => a.localeCompare(b))) {
+        if (level >= depth) {
+          if (!add(`${indent}${name}/ (${fileCount(sub.count)})`)) return;
+        } else {
+          if (!add(`${indent}${name}/`)) return;
+          render(sub, level + 1, `${indent}  `);
+          if (cut) return;
+        }
+      }
+      const names = folder.files.sort((a, b) => a.localeCompare(b));
+      for (const name of names.slice(0, MAX_FILES_PER_FOLDER)) if (!add(`${indent}${name}`)) return;
+      if (names.length > MAX_FILES_PER_FOLDER) add(`${indent}… ${names.length - MAX_FILES_PER_FOLDER} more file${names.length - MAX_FILES_PER_FOLDER === 1 ? "" : "s"}`);
+    };
+    render(root, 1, "  ");
+    if (cut) lines.push(`\n[Stopped at ${MAX_LIST_LINES} lines; list a subfolder, or use a smaller depth]`);
+    return { content: lines.join("\n") };
+  },
+});
+
+interface Folder {
+  folders: Map<string, Folder>;
+  files: string[];
+  /** Files in it and everything below. */
+  count: number;
+}
+
+const newFolder = (): Folder => ({ folders: new Map(), files: [], count: 0 });
+const fileCount = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
+
+/**
+ * Every file under `base`, as glob and list_files see them: listed inside
+ * the sandbox when it's active, so hidden folders stay hidden; with ripgrep
+ * when it's there (and not in a container), which also skips .gitignored files.
+ */
+async function allFiles(ctx: ToolContext, sandbox: Sandbox, base: string): Promise<AsyncGenerator<{ rel: string; abs: string }>> {
+  const rg = sandbox.type === "container" ? undefined : fastTools().rg;
+  if (rg) return listFiles(await sandbox.programSpec(rg, ripgrepListArgs(), ctx.cwd, { chdir: base }), base, ctx.signal);
+  if (sandbox.active) return listFiles(await sandbox.programSpec("find", findArgs(), ctx.cwd, { chdir: base }), base, ctx.signal);
+  return walk(base, ctx.signal);
+}
 
 const MAX_WALK_ENTRIES = 100_000;
 

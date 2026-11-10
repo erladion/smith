@@ -28,8 +28,53 @@ import { ContainerSandbox } from "./container.js";
  * Only flags available in bubblewrap 0.4 are used, the version RHEL 9 ships.
  */
 
-const ENV_ALLOW =
-  /^(PATH|HOME|USER|LOGNAME|SHELL|TERM|TZ|LANG|LANGUAGE|LC_[A-Z_]+|COLORTERM|NO_COLOR|FORCE_COLOR|CI|EDITOR|JAVA_HOME|GOPATH|GOROOT|CARGO_HOME|RUSTUP_HOME|VIRTUAL_ENV|CONDA_PREFIX|PYTHONPATH|NODE_PATH|GEM_HOME|GEM_PATH)$/;
+/**
+ * Environment variables passed into the bwrap sandbox: the basics, and what
+ * compilers and build tools read (including what RHEL's gcc-toolset, scl and
+ * environment modules set). Left out: anything that commonly holds
+ * credentials, such as NPM_CONFIG_* or PIP_INDEX_URL; sandbox.env adds more.
+ */
+const ENV_ALLOW = new RegExp(
+  "^(" +
+    [
+      "PATH|HOME|USER|LOGNAME|SHELL|TERM|TZ|LANG|LANGUAGE|LC_[A-Z_]+|COLORTERM|NO_COLOR|FORCE_COLOR|CI|EDITOR",
+      // Compilers and linkers.
+      "CC|CXX|CPP|FC|F77|LD|AR|AS|NM|RANLIB|STRIP|CFLAGS|CXXFLAGS|CPPFLAGS|FFLAGS|LDFLAGS|LDLIBS|MAKEFLAGS|CMAKE_[A-Z_]+",
+      "LD_LIBRARY_PATH|LIBRARY_PATH|CPATH|C_INCLUDE_PATH|CPLUS_INCLUDE_PATH|PKG_CONFIG_PATH|PKG_CONFIG_LIBDIR|MANPATH|INFOPATH",
+      // gcc-toolset / scl, and environment modules.
+      "X_SCLS|PCP_DIR|MODULEPATH|MODULESHOME|LOADEDMODULES|_LMFILES_|MODULES_[A-Z_]+|LMOD_[A-Z_]+",
+      // Languages and their build tools.
+      "JAVA_HOME|MAVEN_HOME|M2_HOME|MAVEN_OPTS|GRADLE_HOME|GRADLE_USER_HOME|GRADLE_OPTS|JAVA_TOOL_OPTIONS",
+      "GOPATH|GOROOT|GOFLAGS|GOCACHE|GOMODCACHE|GOPROXY|GOPRIVATE|GONOSUMDB|GOTOOLCHAIN|CGO_ENABLED",
+      "CARGO_HOME|RUSTUP_HOME|RUSTFLAGS|CARGO_TARGET_DIR",
+      "VIRTUAL_ENV|CONDA_PREFIX|CONDA_DEFAULT_ENV|PYTHONPATH|PYTHONHOME|NODE_PATH|NODE_OPTIONS|GEM_HOME|GEM_PATH|PERL5LIB",
+      // Proxies and internal certificate authorities, for when the network is on.
+      "HTTP_PROXY|HTTPS_PROXY|NO_PROXY|ALL_PROXY|http_proxy|https_proxy|no_proxy|all_proxy",
+      "SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|NODE_EXTRA_CA_CERTS",
+    ].join("|") +
+    ")$",
+);
+
+/** The proxy variables, which a container needs from here too (its own build settings come with its image). */
+export const PROXY_VARS = /^(HTTP_PROXY|HTTPS_PROXY|NO_PROXY|ALL_PROXY|http_proxy|https_proxy|no_proxy|all_proxy)$/;
+
+/**
+ * The variables for sandboxed commands: those of `allowed` from this
+ * environment, then `extra` from the config: "NAME" passes NAME through,
+ * "NAME=value" sets it.
+ */
+export function sandboxEnv(allowed: RegExp, extra: string[] = []): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(process.env)) if (value !== undefined && allowed.test(name)) env[name] = value;
+  for (const entry of extra) {
+    const eq = entry.indexOf("=");
+    if (eq > 0) env[entry.slice(0, eq)] = entry.slice(eq + 1);
+    else if (process.env[entry] !== undefined) env[entry] = process.env[entry]!;
+  }
+  for (const name of AGENT_SECRETS) delete env[name];
+  return env;
+}
+
 
 /** Variables holding this agent's own credentials, removed even when unsandboxed. */
 const AGENT_SECRETS = ["SMITH_API_KEY", "AGENT_API_KEY", "OPENAI_API_KEY"];
@@ -124,6 +169,8 @@ export interface ContainerSettings {
 export interface SandboxOptions {
   type: SandboxType;
   network: boolean;
+  /** More variables for commands: "NAME" passes it through, "NAME=value" sets it. */
+  env?: string[];
   limits?: Limits;
   /** bwrap: home folders shown read-only, and ones kept writable (absolute paths). */
   home?: { show: string[]; writable: string[] };
@@ -166,8 +213,22 @@ export interface Sandbox {
    * Undefined for ordinary paths.
    */
   sandboxPath(p: string, project: string): { host?: string; root?: string } | undefined;
+  /** What the model should know about where its commands run, for the system prompt. */
+  promptNotes(project: string): string[];
+  /** A note for the model when a failed command's output looks like the sandbox's doing, else undefined. */
+  explainFailure(output: string, project: string): string | undefined;
   /** Stops and removes what it started (containers); also done at exit. */
   dispose(): void;
+}
+
+const READ_ONLY = /Read-only file system|EROFS/;
+const NO_NETWORK =
+  /Could not resolve host|Temporary failure in name resolution|Name or service not known|getaddrinfo (ENOTFOUND|EAI_AGAIN)|Network is unreachable|ENETUNREACH|Failed to establish a new connection|Could not resolve|no such host|Cannot download|Connection refused.*:443|Failed to connect to/i;
+
+/** The note for a network failure while the network is off. */
+function networkNote(output: string, network: boolean): string | undefined {
+  if (network || !NO_NETWORK.test(output)) return undefined;
+  return "[Sandbox: the network is off, so this couldn't download or connect. Don't work around it; tell the user they can turn it on with /network on, or carry on without it.]";
 }
 
 export const Sandbox = {
@@ -185,7 +246,7 @@ export const Sandbox = {
     if (opts.type === "off") return new NoSandbox("disabled with --sandbox off");
     if (opts.type === "container") {
       if (!opts.container) throw new Error("Container settings are missing.");
-      return new ContainerSandbox(opts.container, opts.network, opts.limits);
+      return new ContainerSandbox(opts.container, opts.network, opts.limits, opts.env);
     }
     const problem = probeBwrap();
     if (problem) {
@@ -195,7 +256,7 @@ export const Sandbox = {
           "To run without a sandbox anyway (e.g. inside a container that already isolates it), pass --sandbox off.",
       );
     }
-    return new BwrapSandbox(opts.network, opts.limits, opts.home);
+    return new BwrapSandbox(opts.network, opts.limits, opts.home, opts.env);
   },
 };
 
@@ -240,6 +301,14 @@ class NoSandbox implements Sandbox {
     return undefined;
   }
 
+  promptNotes(): string[] {
+    return ["Shell commands run directly on the user's machine, not in a sandbox. Be careful with anything that changes things outside the working directory."];
+  }
+
+  explainFailure(): undefined {
+    return undefined;
+  }
+
   dispose(): void {}
 }
 
@@ -259,6 +328,7 @@ class BwrapSandbox implements Sandbox {
     public network: boolean,
     limits: Limits | undefined,
     home: { show: string[]; writable: string[] } = { show: [], writable: [] },
+    private readonly extraEnv: string[] = [],
   ) {
     this.home = { show: [...pathFoldersInHome(), ...home.show], writable: home.writable };
     for (const dir of home.writable) {
@@ -290,8 +360,7 @@ class BwrapSandbox implements Sandbox {
   }
 
   private bwrap(file: string, args: string[], project: string, opts: { chdir?: string; network: boolean }): SpawnSpec {
-    const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => ENV_ALLOW.test(k)));
-    env.TMPDIR = "/tmp";
+    const env: NodeJS.ProcessEnv = { ...sandboxEnv(ENV_ALLOW, this.extraEnv), TMPDIR: "/tmp" };
     const root = this.privateTemp();
     const sandboxArgs = bwrapArgs(project, {
       network: opts.network,
@@ -327,6 +396,37 @@ class BwrapSandbox implements Sandbox {
       if (!isWithin(dir, p)) continue;
       const root = path.join(this.privateTemp(), name);
       return { host: path.join(root, p.slice(dir.length)), root };
+    }
+    return undefined;
+  }
+
+  promptNotes(project: string): string[] {
+    const outside = (dirs: string[]) => dirs.filter((dir) => !isWithin(dir, project)).map(tildify);
+    const shown = outside(this.home.show);
+    const writable = outside(this.home.writable);
+    const visible = [shown.length && `${shown.join(", ")} (read-only)`, writable.length && `${writable.join(", ")} (writable, and kept)`].filter(Boolean);
+    return [
+      "Shell commands and the file tools run in a sandbox (bubblewrap). Only the working directory, /tmp and the home folder (below) are writable; /tmp is private to this session and kept between commands. Everything else is read-only.",
+      `The home folder is a private, empty one: other projects and dotfiles aren't there${visible.length ? `, apart from ${visible.join(" and ")}` : ""}. Tools can write caches to it (~/.cache and the like); they last for the session.`,
+      "System packages can't be installed. Project-local installs (node_modules, a virtualenv in the working directory) work when the network is on.",
+      "The network is off unless the user turns it on (/network on). The .git folder is read-only: don't commit, the user does that.",
+    ];
+  }
+
+  explainFailure(output: string, project: string): string | undefined {
+    if (READ_ONLY.test(output)) {
+      return "[Sandbox: only the working directory, /tmp and the private home folder are writable; the path above is outside them. Write inside the working directory or /tmp instead (e.g. a build or cache folder there). If a tool insists on a folder in home, the user can share it with sandbox.home.writable in the config.]";
+    }
+    const net = networkNote(output, this.network);
+    if (net) return net;
+    // A file in the hidden part of home that a command expected to find.
+    const home = os.homedir();
+    const missing = output.split("\n").find((line) => /No such file or directory/.test(line) && (line.includes(`${home}/`) || /(^|[\s'"])~\//.test(line)));
+    if (missing) {
+      const paths = (missing.match(/(?:~|\/)[^\s'":]+/g) ?? []).map((p) => (p.startsWith("~") ? path.join(home, p.slice(1)) : p));
+      if (paths.some((p) => this.hiddenHomePath(p, project))) {
+        return "[Sandbox: the home folder is hidden apart from the working directory and a few shown folders, so that file may exist but isn't visible here. Ask the user if you need it; they can show folders with sandbox.home.show.]";
+      }
     }
     return undefined;
   }
@@ -371,6 +471,11 @@ function pathFoldersInHome(): string[] {
     folders.add(path.basename(entry) === "bin" && !tooBroad ? parent : entry);
   }
   return [...folders];
+}
+
+function tildify(p: string): string {
+  const home = os.homedir();
+  return isWithin(home, p) ? `~${p.slice(home.length)}` : p;
 }
 
 /** Whether `p` is `dir` or inside it. */

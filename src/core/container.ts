@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { type ContainerSettings, fileError, hostEnv, type Limits, run, type Sandbox, type SpawnSpec } from "./sandbox.js";
+import { type ContainerSettings, fileError, hostEnv, type Limits, PROXY_VARS, run, type Sandbox, sandboxEnv, type SpawnSpec } from "./sandbox.js";
 
 /**
  * Runs commands in a container (podman or docker), one per project for the
@@ -39,6 +39,7 @@ export class ContainerSandbox implements Sandbox {
     private readonly settings: ContainerSettings,
     network: boolean,
     private readonly limits: Limits | undefined,
+    private readonly extraEnv: string[] = [],
   ) {
     this.networkOn = network;
     const probe = spawnSync(settings.runtime, ["--version"], { encoding: "utf8", timeout: 10_000 });
@@ -86,7 +87,7 @@ export class ContainerSandbox implements Sandbox {
     const runtime = this.settings.runtime;
     return {
       file: runtime,
-      args: ["exec", "-w", cwd, name, "bash", "-c", wrapper, "bash", command, pidFile],
+      args: ["exec", "-w", cwd, ...this.envArgs(), name, "bash", "-c", wrapper, "bash", command, pidFile],
       env: hostEnv(),
       kill: () => {
         const stop = `kill -KILL -- -"$(cat ${pidFile} 2>/dev/null)" 2>/dev/null; rm -f ${pidFile}`;
@@ -118,6 +119,38 @@ export class ContainerSandbox implements Sandbox {
     const spec = { file: this.settings.runtime, args: ["exec", "-i", name, "bash", "-c", script, "bash", file], env: hostEnv() };
     const { code, stderr } = await run(spec, content);
     if (code !== 0) throw fileError(stderr, file, "write");
+  }
+
+  /** -e options for commands: the proxies (when the network is on) and sandbox.env. */
+  private envArgs(): string[] {
+    const env = sandboxEnv(this.networkOn ? PROXY_VARS : /^$/, this.extraEnv);
+    return Object.entries(env).flatMap(([name, value]) => ["-e", `${name}=${value}`]);
+  }
+
+  promptNotes(project: string): string[] {
+    const { image, mounts } = this.settingsFor(project);
+    const shared = mounts.map((m) => parseMount(m)).filter((m) => fs.existsSync(m.source)).map((m) => `${m.target}${m.readOnly ? " (read-only)" : ""}`);
+    const who = this.rootMapsToYou
+      ? "as root, so you can install what a build needs with the image's package manager (dnf, microdnf, apt) or pip/npm; it changes only the container"
+      : "as the user's own account, so system packages can't be installed; project-local installs (node_modules, a virtualenv in the working directory) work";
+    return [
+      `Shell commands run in a ${this.settings.runtime} container from the image ${image}, ${who}. The container lasts for this session: /tmp and anything installed stay until the user quits.`,
+      `Of the user's machine, only the working directory (same path, read-write)${shared.length ? ` and ${shared.join(", ")}` : ""} are visible. Other paths are the container's own files: read_file, grep and list_files read them from the container.`,
+      "The network is off unless the user turns it on (/network on), which replaces the container with a new one. The .git folder is read-only: don't commit, the user does that.",
+    ];
+  }
+
+  explainFailure(output: string): string | undefined {
+    if (/Read-only file system|EROFS/.test(output)) {
+      return "[Sandbox: the path above is read-only in the container (the .git folder, or a read-only mount). Write inside the working directory or the container's own folders instead.]";
+    }
+    if (!this.rootMapsToYou && /Permission denied|must be root|requires root|You need to be root|are you root/i.test(output)) {
+      return "[Sandbox: commands run as the user's own account in this container (the container runtime runs as root here), so installing system packages isn't possible. Install into the working directory instead, or tell the user what's missing.]";
+    }
+    if (!this.networkOn && /Could not resolve host|Temporary failure in name resolution|Name or service not known|getaddrinfo (ENOTFOUND|EAI_AGAIN)|Network is unreachable|ENETUNREACH|Failed to establish a new connection|Could not resolve|no such host|Cannot download|Failed to connect to/i.test(output)) {
+      return "[Sandbox: the network is off, so this couldn't download or connect. Don't work around it; tell the user they can turn it on with /network on (which starts a new container), or carry on without it.]";
+    }
+    return undefined;
   }
 
   /** Everything outside the project is the container's own, with no place on this machine. */

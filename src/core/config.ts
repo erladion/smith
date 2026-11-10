@@ -40,6 +40,10 @@ const SIZE = /^(\d+(?:\.\d+)?)\s*([kmgt]?)i?b?$/i;
 const SandboxSchema = z.strictObject({
   type: z.enum(["bwrap", "container"]).optional().describe("bwrap (default) or container; --sandbox off is only ever per run"),
   network: z.boolean().optional().describe("Let commands use the network from the start (default false)"),
+  env: z
+    .array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*(=.*)?$/s, '"NAME" or "NAME=value"'))
+    .optional()
+    .describe('More environment variables for commands: "NAME" passes it through, "NAME=value" sets it'),
   limits: z
     .strictObject({
       memory: z.string().regex(SIZE, 'a size such as "8g" or "512m"').optional(),
@@ -81,6 +85,7 @@ export const DEFAULT_IMAGE = "registry.access.redhat.com/ubi9/ubi:latest";
 export interface SandboxConfig {
   type: "bwrap" | "container";
   network: boolean;
+  env: string[];
   limits?: Limits;
   home: { show: string[]; writable: string[] };
   container: ContainerSettings;
@@ -182,6 +187,7 @@ function sandboxConfig(raw: z.output<typeof SandboxSchema> | undefined): Sandbox
   return {
     type: raw?.type ?? "bwrap",
     network: raw?.network ?? false,
+    env: raw?.env ?? [],
     limits,
     home: { show: (raw?.home?.show ?? []).map(homePath), writable: (raw?.home?.writable ?? []).map(homePath) },
     container: {

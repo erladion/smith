@@ -266,6 +266,34 @@ describe("the home folder in the bwrap sandbox", { skip: !available && "bwrap is
     sandbox.dispose();
   });
 
+  test("failures caused by the sandbox come with a note; the prompt says how it works", async () => {
+    const sandbox = create();
+    const readOnly = (await sh(sandbox, "touch /usr/smith-test")).content;
+    assert.match(readOnly, /\[Exit code 1\]\n\[Sandbox: only the working directory, \/tmp and the private home folder are writable/);
+    assert.match((await sh(sandbox, "cat ~/other/secret.txt")).content, /\[Sandbox: the home folder is hidden/);
+    assert.doesNotMatch((await sh(sandbox, "cat nothing-here.txt")).content, /\[Sandbox/, "a plain missing file in the project is just that");
+    assert.match(sandbox.explainFailure("curl: (6) Could not resolve host: example.com", project) ?? "", /network is off/);
+    assert.equal(sandbox.explainFailure("error: expected ';'", project), undefined);
+
+    const notes = sandbox.promptNotes(project).join("\n");
+    assert.match(notes, /Only the working directory, \/tmp and the home folder \(below\) are writable/);
+    assert.match(notes, /apart from ~\/tools, ~\/shown \(read-only\) and ~\/cache \(writable, and kept\)/);
+    assert.match(notes, /network is off unless the user turns it on/);
+    sandbox.dispose();
+  });
+
+  test("build variables pass in; sandbox.env adds and sets more; credentials stay out", async () => {
+    const saved = { CC: process.env.CC, NPM_CONFIG__AUTH: process.env.NPM_CONFIG__AUTH, MY_FLAG: process.env.MY_FLAG };
+    Object.assign(process.env, { CC: "gcc-13", NPM_CONFIG__AUTH: "token", MY_FLAG: "on" });
+    try {
+      const sandbox = Sandbox.create({ type: "bwrap", network: false, env: ["MY_FLAG", "BUILD_MODE=release"] });
+      assert.equal((await sh(sandbox, 'echo "$CC|$NPM_CONFIG__AUTH|$MY_FLAG|$BUILD_MODE"')).content, "gcc-13||on|release");
+      sandbox.dispose();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  });
+
   test("limits apply to shell commands", async () => {
     const sandbox = Sandbox.create({ type: "bwrap", network: false, limits: { processes: 64 } });
     const spec = await sandbox.spawnSpec("true", project);
