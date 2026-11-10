@@ -7,7 +7,9 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { Sandbox } from "../src/core/sandbox.js";
-import { bash } from "../src/core/tools/bash.js";
+import { BackgroundJobs } from "../src/core/jobs.js";
+import { bash, createBashTool } from "../src/core/tools/bash.js";
+import { createJobTools } from "../src/core/tools/jobs.js";
 import { editFile, readFile, writeFile } from "../src/core/tools/files.js";
 import { glob, grep } from "../src/core/tools/search.js";
 import type { ToolDef } from "../src/core/tool.js";
@@ -291,6 +293,23 @@ describe("the home folder in the bwrap sandbox", { skip: !available && "bwrap is
       sandbox.dispose();
     } finally {
       for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  });
+
+  test("background jobs run in the sandbox and share its /tmp with other commands", async () => {
+    const sandbox = create();
+    const jobs = new BackgroundJobs();
+    const bg = createBashTool(jobs);
+    const [output] = createJobTools(jobs) as [ToolDef];
+    const ctx = ctxFor(sandbox);
+    try {
+      await bg.run(bg.schema.parse({ command: "cat ~/other/secret.txt 2>&1; sleep 0.5; echo done > /tmp/from-job; echo ready; sleep 30", run_in_background: true }), ctx);
+      const ready = (await output.run(output.schema.parse({ id: "bg1", wait_ms: 10_000, until: "ready" }), ctx)).content;
+      assert.doesNotMatch(ready, /hunter2/);
+      assert.equal((await sh(sandbox, "cat /tmp/from-job")).content, "done");
+    } finally {
+      jobs.clear();
+      sandbox.dispose();
     }
   });
 

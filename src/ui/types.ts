@@ -3,6 +3,7 @@ import type { Agent, ApprovalDecision, ApprovalRequest } from "../core/agent.js"
 import type { Endpoint, Theme } from "../core/config.js";
 import type { AgentEvent } from "../core/events.js";
 import type { Message } from "../core/history.js";
+import type { BackgroundJobs } from "../core/jobs.js";
 import type { ReasoningLevel } from "../core/reasoning.js";
 import type { Sandbox } from "../core/sandbox.js";
 import type { Server } from "../core/server.js";
@@ -88,6 +89,8 @@ export interface TuiOptions {
   theme: Theme;
   /** With the matrix theme: the idle stream of glyphs in the status line. */
   codeStream: boolean;
+  /** Commands the agent started in the background (/jobs, the status line). */
+  jobs?: BackgroundJobs;
 }
 
 /**

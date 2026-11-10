@@ -238,6 +238,7 @@ and folders for `/new`.
 | `/network on\|off` | allow or block network access for sandboxed commands |
 | `/undo` | undo the last turn: restore the files it changed and edit your message again |
 | `/skills` | list the available skills |
+| `/jobs [stop id\|all]` | list the commands the agent runs in the background, or stop them |
 | `/compact` | summarize the conversation now |
 | `/sessions [all]` | switch to another session from this folder, or from every folder with `all` (type to search by name) |
 | `/name [name]` | show or set the current session's name |
@@ -330,6 +331,15 @@ their scripts can run.
   the project's own build command first, give long builds a bigger timeout, start from the first
   error. When a command fails because of the sandbox (a read-only path, no network, a file in the
   hidden part of home), the result says so, so the model doesn't "fix" code that was fine.
+- **Background jobs.** For a dev server, a watcher or a build that takes longer than the
+  timeout, the model runs `bash` with `run_in_background` and gets a job id at once. It follows
+  the job with `bash_output`, which returns new output and can wait for the job to end, or until
+  its output matches a pattern (`until: "listening on"`), and stops it with `bash_kill`. Jobs run
+  in the same sandbox as everything else. The status line counts them, `/jobs` lists and stops
+  them, and they're stopped when you start or switch sessions, and when Smith exits. In a
+  container, a server started this way is reachable at `localhost` from later commands. With
+  bwrap and the network off, every command has a network of its own, so it isn't: use a
+  container, or turn the network on.
 - **Long output keeps its errors.** Command output over 20,000 characters is cut, keeping the
   start, the end, and the lines in between that look like errors (with the two lines after each,
   where compilers show the code).
@@ -419,8 +429,9 @@ src/core/reasoning.ts    reasoning levels -> request fields
 src/core/think.ts        streaming <think> tag parser
 src/core/sandbox.ts      bubblewrap sandbox for shell commands
 src/core/glob.ts         glob matching for the glob tool
-src/core/tools/          read_file, list_files, grep, glob, write_file, edit_file, bash, skill, task,
-                         todo_write, ask_user
+src/core/tools/          read_file, list_files, grep, glob, write_file, edit_file, bash,
+                         bash_output, bash_kill, skill, task, todo_write, ask_user
+src/core/jobs.ts         background jobs
 src/core/instructions.ts AGENTS.md loading
 src/core/skills.ts       skill discovery and SKILL.md headers
 src/core/diff.ts         line diffs (Myers) for approvals and the transcript

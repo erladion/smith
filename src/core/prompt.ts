@@ -34,6 +34,7 @@ How to work:
   }
 - Before building or testing, find out how this project does it (README, AGENTS.md, Makefile, package.json scripts, CMakeLists.txt, pom.xml, build.gradle, pyproject.toml) and use that command; then keep using it.
 - Builds and test suites can take minutes: give bash a larger timeout_ms for them (up to 600000).
+- For commands that keep running (dev servers, watchers) or take longer than that, use bash with run_in_background, follow them with bash_output (wait_ms and until wait for them), and stop them with bash_kill when you're done.
 - When a build or test fails, read the first error before changing anything; later errors often follow from it.
 - After making a change, check it when you can, for example by running the build or tests.
 - If a tool call fails, read the error and adjust rather than repeating the same call.

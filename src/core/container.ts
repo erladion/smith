@@ -136,7 +136,8 @@ export class ContainerSandbox implements Sandbox {
     return [
       `Shell commands run in a ${this.settings.runtime} container from the image ${image}, ${who}. The container lasts for this session: /tmp and anything installed stay until the user quits.`,
       `Of the user's machine, only the working directory (same path, read-write)${shared.length ? ` and ${shared.join(", ")}` : ""} are visible. Other paths are the container's own files: read_file, grep and list_files read them from the container.`,
-      "The network is off unless the user turns it on (/network on), which replaces the container with a new one. The .git folder is read-only: don't commit, the user does that.",
+      "The network is off unless the user turns it on (/network on), which replaces the container with a new one (stopping background jobs). The .git folder is read-only: don't commit, the user does that.",
+      "Background jobs (run_in_background) run in the same container, so a server started that way is reachable at localhost from later commands.",
     ];
   }
 

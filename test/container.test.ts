@@ -8,7 +8,9 @@ import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { parseMount } from "../src/core/container.js";
 import { Sandbox } from "../src/core/sandbox.js";
-import { bash } from "../src/core/tools/bash.js";
+import { BackgroundJobs } from "../src/core/jobs.js";
+import { bash, createBashTool } from "../src/core/tools/bash.js";
+import { createJobTools } from "../src/core/tools/jobs.js";
 import { editFile, readFile, writeFile } from "../src/core/tools/files.js";
 import { glob, grep, list } from "../src/core/tools/search.js";
 import type { ToolDef } from "../src/core/tool.js";
@@ -117,6 +119,25 @@ describe("the container sandbox", { skip: !available && "docker or the ubi9 imag
     await new Promise((r) => setTimeout(r, 500));
     const left = await sh("for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline 2>/dev/null; echo; done | grep -c '^sleep 60' || true");
     assert.equal(left, "0");
+  });
+
+  test("background jobs run in the container: they share it, and stopping one ends it inside", async () => {
+    const jobs = new BackgroundJobs();
+    const bg = createBashTool(jobs);
+    const [output, kill] = createJobTools(jobs) as [ToolDef, ToolDef];
+    try {
+      const res = await bg.run(bg.schema.parse({ command: "echo $$ > /tmp/job.pid; sleep 0.5; echo ready; sleep 60", run_in_background: true }), ctx());
+      assert.match(res.content, /Started background job bg1/);
+      assert.match((await output.run(output.schema.parse({ id: "bg1", wait_ms: 10_000, until: "ready" }), ctx())).content, /ready/);
+      const pid = await sh("cat /tmp/job.pid");
+      assert.equal(await sh(`test -d /proc/${pid} && echo alive`), "alive");
+      await kill.run(kill.schema.parse({ id: "bg1" }), ctx());
+      await new Promise((r) => setTimeout(r, 500));
+      assert.equal(await sh(`test -d /proc/${pid} && echo alive || echo gone`), "gone");
+      assert.match(sandbox.promptNotes(project).join(" "), /reachable at localhost from later commands/);
+    } finally {
+      jobs.clear();
+    }
   });
 
   test("switching the network starts a new container; dispose removes them", async () => {

@@ -1,6 +1,7 @@
 import type { Agent, ApprovalDecision, ApprovalRequest } from "../core/agent.js";
 import { describeError } from "../core/errors.js";
 import type { AgentEvent, BlockKind } from "../core/events.js";
+import { describeJob } from "../core/jobs.js";
 import type { Server } from "../core/server.js";
 import type { Answer, Question } from "../core/tools/ask.js";
 import { TODO_TOOL, unfinished } from "../core/tools/todo.js";
@@ -100,6 +101,7 @@ export class TuiApp implements UiContext {
     this.agent = opts.createAgent(this.hooks);
     this.connection = new ConnectionCommands(this);
     this.sessions = new SessionCommands(this, this.connection);
+    if (opts.jobs) opts.jobs.onChange = () => this.requestRender();
   }
 
   /** Runs until the user quits. */
@@ -145,6 +147,9 @@ export class TuiApp implements UiContext {
   }
 
   startOver(start: Start, entries: Entry[]): void {
+    // Background jobs belong to the conversation that started them.
+    const stopped = this.opts.jobs?.clear() ?? 0;
+    if (stopped) entries = [{ kind: "notice", level: "info", text: `Stopped ${stopped} background job${stopped === 1 ? "" : "s"} from the previous session.` }, ...entries];
     this.renderer.reset();
     this.transcript.length = 0;
     this.live = null;
@@ -343,6 +348,7 @@ export class TuiApp implements UiContext {
           sandbox: this.opts.sandbox,
           busy: this.busy,
           queueing: this.agentRunning,
+          jobs: this.opts.jobs?.running,
           filler: this.streaming ? (n) => codeStream(Math.floor(this.frame / STREAM_EVERY), n) : undefined,
         },
         width,
@@ -614,6 +620,8 @@ export class TuiApp implements UiContext {
         return this.undo();
       case "/skills":
         return this.listSkills();
+      case "/jobs":
+        return this.manageJobs(arg);
       case "/compact":
         this.setCompacting(true);
         return this.runBusy("Compacting…", (signal) => this.agent.compactNow(signal));
@@ -694,6 +702,30 @@ export class TuiApp implements UiContext {
       return this.print({ kind: "notice", level: "info", text: "No skills found. Add folders with a SKILL.md to .agents/skills/ in the project or ~/.config/smith/skills/." });
     }
     this.print({ kind: "notice", level: "info", text: skills.map((s) => `${s.name}: ${s.description.replace(/\s+/g, " ")}`).join("\n") });
+  }
+
+  /** /jobs: list background jobs, or stop one or all. */
+  private async manageJobs(arg: string): Promise<void> {
+    const { jobs } = this.opts;
+    if (!jobs) return this.print({ kind: "notice", level: "info", text: "Background jobs aren't available here." });
+    const [action, id] = arg.split(/\s+/);
+    if (action === "stop" && id) {
+      if (id === "all") {
+        const stopped = jobs.stopAll();
+        return this.print({ kind: "notice", level: "info", text: stopped ? `Stopped ${stopped} background job${stopped === 1 ? "" : "s"}.` : "No background jobs are running." });
+      }
+      try {
+        const status = await jobs.stop(id);
+        return this.print({ kind: "notice", level: "info", text: `Stopped ${id} (${describeJob(status)}).` });
+      } catch (err) {
+        return this.print({ kind: "notice", level: "error", text: (err as Error).message });
+      }
+    }
+    if (arg) return this.print({ kind: "notice", level: "error", text: "Use /jobs to list background jobs, /jobs stop <id> or /jobs stop all to stop them." });
+    const list = jobs.list();
+    if (list.length === 0) return this.print({ kind: "notice", level: "info", text: "No background jobs. The agent starts them with bash's run_in_background." });
+    const lines = list.map((j) => `${j.id}  ${describeJob(j).padEnd(20)} started ${formatDuration(Date.now() - j.started.getTime())} ago  ${j.command}`);
+    this.print({ kind: "notice", level: "info", text: `${lines.join("\n")}\n/jobs stop <id> or /jobs stop all stops them.` });
   }
 
   private setNetwork(arg: string): void {

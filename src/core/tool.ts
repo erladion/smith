@@ -29,6 +29,8 @@ export interface ToolDef<S extends z.ZodType = z.ZodType> {
   schema: S;
   /** Read-only tools run without asking the user. */
   readOnly: boolean;
+  /** Whether sub-agents get this tool; defaults to `readOnly`. */
+  subagents?: boolean;
   /** Runs inside the sandbox when one is active (shown in the approval prompt). */
   sandboxed?: boolean;
   /** One-line description of a call, shown in the transcript and approval prompt. */

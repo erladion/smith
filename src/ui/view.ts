@@ -70,6 +70,8 @@ export interface Status {
   busy: boolean;
   /** An agent turn is running, so enter queues a message. */
   queueing: boolean;
+  /** Commands running in the background. */
+  jobs?: number;
   /** Fills spare room at the right end with this many columns of something, e.g. a code stream. */
   filler?: (width: number) => string;
 }
@@ -83,6 +85,7 @@ export function statusLine(status: Status, width: number): Line {
     parts.push(context.limit ? `${Math.round((100 * context.tokens) / context.limit)}% of ${k(context.limit)} context` : `${k(context.tokens)} tokens`);
   }
   if (sandbox.active) parts.push(`${sandbox.type === "container" ? "container" : "sandbox"}, net ${sandbox.network ? "on" : "off"}`);
+  if (status.jobs) parts.push(`${status.jobs} background job${status.jobs === 1 ? "" : "s"}`);
   if (status.busy) parts.push(status.queueing ? "esc to interrupt · enter queues" : "esc to interrupt");
   const line: Line = sandbox.active ? [] : [{ text: "unsandboxed · ", style: { color: "red" } }];
   line.push({ text: parts.filter(Boolean).join(" · "), style: DIM });

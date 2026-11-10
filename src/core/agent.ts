@@ -417,7 +417,7 @@ export class Agent {
       contextSize: this.contextSize,
       sandbox: this.opts.sandbox,
       // Read-only tools only (which also rules out nested sub-agents), no checklist or questions.
-      tools: this.opts.tools.filter((t) => t.readOnly),
+      tools: this.opts.tools.filter((t) => t.subagents ?? t.readOnly),
       todos: false,
       systemPrompt: this.opts.subagentPrompt!,
       alwaysAllowed: this.alwaysAllowed,

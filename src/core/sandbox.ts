@@ -410,6 +410,7 @@ class BwrapSandbox implements Sandbox {
       `The home folder is a private, empty one: other projects and dotfiles aren't there${visible.length ? `, apart from ${visible.join(" and ")}` : ""}. Tools can write caches to it (~/.cache and the like); they last for the session.`,
       "System packages can't be installed. Project-local installs (node_modules, a virtualenv in the working directory) work when the network is on.",
       "The network is off unless the user turns it on (/network on). The .git folder is read-only: don't commit, the user does that.",
+      "While the network is off, every command has a network of its own: a server started with run_in_background can't be reached from other commands (curl localhost fails). Background jobs suit long builds and watchers; for a server you need to talk to, ask the user to turn the network on.",
     ];
   }
 

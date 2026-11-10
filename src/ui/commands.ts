@@ -72,6 +72,12 @@ export const COMMANDS: CommandSpec[] = [
       { value: "off", hint: "block network access" },
     ]),
   },
+  {
+    name: "/jobs",
+    args: "[stop id|all]",
+    description: "list the commands the agent runs in the background, or stop one or all",
+    complete: fixed([{ value: "stop all", hint: "stop every background job" }]),
+  },
   { name: "/compact", description: "summarize the conversation now to free context" },
   { name: "/exit", description: "quit" },
 ];

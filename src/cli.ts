@@ -17,7 +17,8 @@ import { findSession, listSessions, secureSessions, Session } from "./core/sessi
 import { loadSkills, type Skill, skillRoots } from "./core/skills.js";
 import type { ToolDef } from "./core/tool.js";
 import { fastTools } from "./core/toolchain.js";
-import { defaultTools } from "./core/tools/index.js";
+import { BackgroundJobs } from "./core/jobs.js";
+import { createDefaultTools } from "./core/tools/index.js";
 import { createSkillTool } from "./core/tools/skill.js";
 import { TuiApp } from "./ui/app.js";
 import type { AgentHooks, AgentSettings, ProjectView } from "./ui/types.js";
@@ -187,6 +188,8 @@ async function main(): Promise<void> {
     for (const warning of warnings) process.stderr.write(`[warn] ${warning}\n`);
     process.stderr.write(`[${server.label} · ${model} · ${sandbox.describe(project.cwd)}]\n`);
     await runHeadless(createAgent, values.print, values.yes ?? false, server.baseURL);
+    // Their open output pipes would keep the process alive.
+    jobs.stopAll();
     process.stderr.write(`[session ${session.id}]\n`);
     return;
   }
@@ -237,6 +240,7 @@ async function main(): Promise<void> {
     resumedLastUsed: resumed?.session.lastUsed,
     theme: config.theme,
     codeStream: config.codeStream,
+    jobs,
     savePreferences: ({ server, model, reasoning }) => {
       if (model) session.recordModel(model, server.name);
       savePreferences({
@@ -246,6 +250,7 @@ async function main(): Promise<void> {
       });
     },
   }).run();
+  jobs.stopAll();
   const resumeWith = session.name && !/\s/.test(session.name) ? session.name : session.id;
   const goodbye = config.theme === "matrix" ? `${farewell(Date.now() - tuiStarted)}\n` : "";
   console.log(`${goodbye}Session ${session.name ? `"${session.name}" ` : ""}${session.id}. Resume with: smith --resume ${resumeWith}`);
@@ -273,7 +278,8 @@ function visibleFolders(project: Project): string[] {
 function loadProject(cwd: string): Project {
   const instructions = loadInstructions(cwd);
   const { skills, warnings } = loadSkills(skillRoots(findRepoRoot(cwd) ?? cwd));
-  const tools = skills.length ? [...defaultTools, createSkillTool(skills)] : defaultTools;
+  const tools = createDefaultTools(jobs);
+  if (skills.length) tools.push(createSkillTool(skills));
   return { cwd, instructions, skills, tools, warnings };
 }
 
@@ -386,6 +392,9 @@ function printSessions(cwd: string | undefined): void {
   for (const row of rows) console.log(fit(row));
   console.log(`\n${sessions.length} session${sessions.length === 1 ? "" : "s"}. Resume one with: smith --resume <id or name>`);
 }
+
+/** Commands the agent runs in the background; they're stopped when Smith exits. */
+const jobs = new BackgroundJobs();
 
 async function runHeadless(
   createAgent: (hooks: AgentHooks) => Agent,

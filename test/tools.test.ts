@@ -4,7 +4,9 @@ import { existsSync, mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
-import { bash } from "../src/core/tools/bash.js";
+import { BackgroundJobs } from "../src/core/jobs.js";
+import { bash, createBashTool } from "../src/core/tools/bash.js";
+import { createJobTools } from "../src/core/tools/jobs.js";
 import { editFile, readFile, writeFile } from "../src/core/tools/files.js";
 import { glob, grep, list } from "../src/core/tools/search.js";
 import { buildSystemPrompt } from "../src/core/prompt.js";
@@ -215,5 +217,56 @@ describe("list_files", () => {
     assert.match((await run(list, { path: "nope" })).content, /nope doesn't exist/);
     await fs.mkdir(path.join(dir, "empty"));
     assert.match((await run(list, { path: "empty" })).content, /empty is empty/);
+  });
+});
+
+describe("background jobs", () => {
+  const jobs = new BackgroundJobs();
+  const bg = createBashTool(jobs);
+  const [output, kill] = createJobTools(jobs) as [ToolDef, ToolDef];
+  after(() => jobs.clear());
+
+  test("a background command returns at once; its output is read in pieces", async () => {
+    const started = Date.now();
+    const res = await run(bg, { command: "echo first; sleep 1.5; echo second", run_in_background: true });
+    assert.ok(Date.now() - started < 1500);
+    assert.match(res.content, /^Started background job bg1\b[\s\S]*Output so far:\nfirst/);
+    assert.equal(jobs.running, 1);
+
+    const waited = await run(output, { id: "bg1", wait_ms: 5000 });
+    assert.match(waited.content, /^first\nsecond\n\n\[Job bg1: exited with code 0\]$/, "what the start showed stays unread");
+    assert.match((await run(output, { id: "bg1" })).content, /^\(no new output\)/);
+    assert.equal(jobs.running, 0);
+  });
+
+  test("until stops waiting as soon as the output matches", async () => {
+    const res = await run(bg, { command: "sleep 0.3; echo 'server listening on :8080'; sleep 30", run_in_background: true });
+    const id = /job (bg\d+)/.exec(res.content)![1]!;
+    const started = Date.now();
+    const ready = await run(output, { id, wait_ms: 10_000, until: "listening on" });
+    assert.ok(Date.now() - started < 5_000);
+    assert.match(ready.content, /server listening on :8080[\s\S]*running; the output matched \/listening on\//);
+    assert.match((await run(kill, { id })).content, new RegExp(`Stopped job ${id} \\(stopped \\(SIGKILL\\)\\)`));
+    assert.match((await run(kill, { id })).content, /had already ended/);
+  });
+
+  test("bash_kill stops what the job started too; unknown ids and failures say so", async () => {
+    const res = await run(bg, { command: "sleep 30 & sleep 30; wait", run_in_background: true });
+    const id = /job (bg\d+)/.exec(res.content)![1]!;
+    await run(kill, { id });
+    assert.equal(jobs.running, 0);
+    await assert.rejects(run(output, { id: "bg99" }), /No background job bg99\. Jobs: bg1, bg2, bg3\./);
+    const failed = await run(bg, { command: "echo nope >&2; exit 4", run_in_background: true });
+    assert.equal(failed.isError, true);
+    assert.match(failed.content, /exited with code 4 right away[\s\S]*nope/);
+    assert.equal(kill.subagents, false, "sub-agents can read jobs, not stop them");
+  });
+
+  test("clear stops every job and starts the numbering again", async () => {
+    await run(bg, { command: "sleep 30", run_in_background: true });
+    assert.equal(jobs.clear(), 1);
+    assert.deepEqual(jobs.list(), []);
+    assert.match((await run(bg, { command: "sleep 30", run_in_background: true })).content, /job bg1\b/);
+    jobs.clear();
   });
 });
