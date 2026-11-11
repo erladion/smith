@@ -481,11 +481,14 @@ longer (up to 10).
 
 With [bubblewrap](https://github.com/containers/bubblewrap):
 
-- the filesystem is read-only except the project directory and a private `/tmp` and
-  `/var/tmp`: empty at first, kept between commands for as long as the agent runs (so a build
-  can leave files there for the next command), and deleted when it exits
+- the only real place a command can change is the project directory (and folders you share
+  with `sandbox.home.writable`); everything else is read-only, or a private stand-in
+- `/tmp`, `/var/tmp` and `/dev/shm` are private, empty ones: kept between commands for as long
+  as the agent runs (so a build can leave files there for the next command), and deleted when
+  it exits
 - your home folder is replaced by a private, empty one, kept the same way: builds can write
-  caches to `~/.cache` and the like, but other projects, tokens and dotfiles aren't there.
+  caches to `~/.cache` and the like, but other projects, tokens and dotfiles aren't there, and
+  nothing written there reaches your real home.
   Shown read-only on top of it: the project, the repository it's in (for a submodule or
   subfolder), skill folders, and the folders on your `PATH` inside home, so your own tools keep
   working (for a `bin` folder its parent, e.g. `~/.cargo`, except `~/bin` and `~/.local/bin`).

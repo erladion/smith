@@ -9,12 +9,14 @@ import { ContainerSandbox } from "./container.js";
  * bubblewrap (bwrap), the same unprivileged sandbox Flatpak uses. Inside the
  * sandbox:
  *
- * - The whole filesystem is read-only, except the project directory and a
- *   private /tmp (and /var/tmp). That /tmp starts empty and is kept for as
- *   long as the agent runs, so one command can use what another left there;
- *   it's deleted when the agent exits.
- * - The home folder is a private, empty one too, showing only the project,
- *   the tool folders on PATH and the folders chosen in the config.
+ * - The only real place a command can change is the project directory (and
+ *   folders shared with sandbox.home.writable). Everything else is read-only,
+ *   or a private stand-in: /tmp, /var/tmp and the home folder are this run's
+ *   own, empty at first, kept between commands for as long as the agent runs
+ *   (so one command can use what another left there) and deleted when it
+ *   exits. /dev/shm is bwrap's own.
+ * - The private home folder shows only the project, the tool folders on
+ *   PATH and the folders chosen in the config.
  *   Credentials and history in it (~/.ssh, ~/.aws, shell history, ...) stay
  *   hidden even then, as are /run (Docker, Podman and D-Bus sockets)
  *   and /mnt (Windows drives and the WSL interop socket on WSL).
@@ -537,7 +539,7 @@ export function fileError(stderr: string, file: string, op: "open" | "write"): N
     [/Is a directory/, "EISDIR", `EISDIR: illegal operation on a directory, ${op} '${file}'`],
     [/Not a directory/, "ENOTDIR", `ENOTDIR: not a directory, ${op} '${file}'`],
     [/Permission denied/, "EACCES", `EACCES: permission denied, ${op} '${file}'`],
-    [/Read-only file system/, "EROFS", `Can't write ${file}: the sandbox only allows writes inside the project and /tmp.`],
+    [/Read-only file system/, "EROFS", `Can't write ${file}: the sandbox only allows writes inside the project (and its own private /tmp and home folder).`],
     [/[Nn]o such container|is not running/, "ESRCH", `The container stopped; run the command again to start a new one.`],
   ];
   const match = known.find(([pattern]) => pattern.test(stderr));
@@ -607,7 +609,7 @@ export function bwrapArgs(cwdGiven: string, { network, readOnlyPaths = [], tempR
   const around = (dir: string) => cwd === dir || cwd.startsWith(`${dir}/`);
   for (const dir of readOnly.filter(around)) args.push("--ro-bind", dir, dir);
 
-  // The one writable place. Bound after the system masks so a project under
+  // The one real writable place (with home.writable). Bound after the system masks so a project under
   // /tmp or /mnt (or home) stays visible, and before the home masks so a
   // project at the home directory doesn't re-expose ~/.ssh and friends.
   args.push("--bind", cwd, cwd);
