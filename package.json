@@ -1,6 +1,6 @@
 {
   "name": "smith",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "A small agentic coding harness with a terminal UI for OpenAI-compatible endpoints",
   "scripts": {
     "dev": "tsx src/cli.ts",
